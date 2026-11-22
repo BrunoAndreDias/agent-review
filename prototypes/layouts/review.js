@@ -165,7 +165,6 @@ const st = {
   variant: +(opt('--variant') || 1), onlyChanged: false, expanded: new Set(), viewed: new Set(),
   a: { focus: 'tree', sel: 0, top: 0, cur: 0, vtop: 0, full: false, path: null },
   b: { focus: 'view', sel: 0, cur: 0, top: 0 },
-  c: { screen: 'browse', dir: '', sel: 0, top: 0, cur: 0, vtop: 0, full: true, path: null },
   input: null, picker: null, preview: null, msg: '', msgAt: 0, pageH: 20,
 };
 const flash = (m) => { st.msg = m; st.msgAt = Date.now(); };
@@ -223,8 +222,6 @@ function treeLine(n, depth, w, sel, focused, flat = false) {
 
 const docA = () => (st.a.path ? fileDoc(st.a.path, st.a.full) : []);
 const docB = () => data.changedList.flatMap((p) => [{ k: 'file', p }, ...(st.viewed.has(p) ? [] : fileDoc(p, false)), { k: 'gap', p }]);
-const docC = () => (st.c.path ? fileDoc(st.c.path, st.c.full) : []);
-const browseEntries = () => { const n = findNode(st.c.dir) || ((st.c.dir = ''), data.tree); return [...(st.c.dir ? ['..'] : []), ...kidsOf(n)]; };
 
 function renderA(W, h) {
   const a = st.a;
@@ -276,34 +273,10 @@ function renderB(W, h) {
   return left.map((l, i) => l + C.border + '│' + R + right[i]);
 }
 
-function renderC(W, h) {
-  const c = st.c;
-  if (c.screen === 'file') {
-    const doc = docC();
-    c.cur = clamp(c.cur, doc.length);
-    c.vtop = scroll(c.cur, c.vtop, h - 1);
-    st.pageH = h - 1;
-    const mode = data.changed.has(c.path) ? (c.full ? 'full file, changes marked' : 'diff only') : 'unchanged';
-    return [paint(` ${project}/${c.path}  ·  ${mode}`, W, C.title), ...docLines(doc, c.cur, c.vtop, h - 1, W, true)];
-  }
-  const entries = browseEntries();
-  c.sel = clamp(c.sel, entries.length);
-  c.top = scroll(c.sel, c.top, h - 1);
-  st.pageH = h - 1;
-  const lines = [paint(` ${project}/${c.dir}${c.dir ? '/' : ''}`, W, C.title)];
-  for (let i = 0; i < h - 1; i++) {
-    const idx = c.top + i, e = entries[idx];
-    if (!e) lines.push(paint('', W));
-    else if (e === '..') lines.push(paintSel(' ../', W, C.dim, idx === c.sel));
-    else lines.push(treeLine(e, 0, W, idx === c.sel, true, true));
-  }
-  return lines;
-}
-
 function header(W) {
-  const names = ['Explorer', 'PR stack', 'Reader'];
+  const names = ['Explorer', 'Review'];
   const left = ' agent-review ';
-  const tabs = names.map((n, i) => ` ${i + 1} ${n} `);
+  const tabs = names.map((n) => ` ${n} `);
   const right = ` ${project} · base ${BASE.slice(0, 7)} · ${data.changedList.length} changed · ${comments.length} comments${st.onlyChanged ? ' · changed only' : ''} `;
   const used = left.length + tabs.join('').length;
   const gap = Math.max(1, W - used - right.length);
@@ -311,10 +284,8 @@ function header(W) {
 }
 
 const HINTS = {
-  1: '↑↓ move · enter open · ←→ fold · tab switch pane · d diff/full · c comment · x delete · n next change · f changed only · s send · 1/2/3 layout · q quit',
-  2: '↑↓ move · tab files/diffs · v mark viewed · c comment · x delete · n next change · s send · p preview · 1/2/3 layout · q quit',
-  '3browse': 'enter open · ← up a folder · f changed only · s send · p preview · 1/2/3 layout · q quit',
-  '3file': '↑↓ move · n/N next/prev change · d full/diff · c comment · x delete · ← back · s send · q quit',
+  1: 'tab Review · ↑↓ move · enter open · ← back · d diff/full · c comment · x delete · n next change · f changed only · s send · q quit',
+  2: 'tab Explorer · ↑↓ move · ←→ files/diffs · v mark viewed · c comment · x delete · n next change · s send · p preview · q quit',
 };
 function footer(W) {
   if (st.input) {
@@ -323,8 +294,7 @@ function footer(W) {
     return paint(` ✎ ${where} › ${i.text}▏   enter save · esc cancel`, W, C.title);
   }
   if (st.msg) return paint(` ${st.msg}`, W, C.warn);
-  const key = st.variant === 3 ? '3' + st.c.screen : st.variant;
-  return paint(` ${HINTS[key]}`, W, C.dim);
+  return paint(` ${HINTS[st.variant]}`, W, C.dim);
 }
 
 function frame(W, H) {
@@ -335,7 +305,7 @@ function frame(W, H) {
     while (body.length < H - 2) body.push(paint('', W));
     return [paint(' Message the agent will receive', W, C.title), ...body, paint(' j/k scroll · s send · esc close', W, C.title)];
   }
-  const lines = [header(W), ...[renderA, renderB, renderC][st.variant - 1](W, H - 2), footer(W)];
+  const lines = [header(W), ...[renderA, renderB][st.variant - 1](W, H - 2), footer(W)];
   if (st.picker) {
     const p = st.picker;
     const box = [paint(` ${p.title}   enter choose · esc cancel`, W, C.title), ...p.items.map((it, i) => paintSel(`   ${it.label}`, W, C.bar, i === p.sel)), paint('', W, C.bar)];
@@ -381,7 +351,6 @@ function selectA(r) { if (r && !r.node.dir && r.node.path !== st.a.path) Object.
 
 function keyA(k) {
   const a = st.a;
-  if (k === 'tab') { a.focus = a.focus === 'tree' ? 'view' : 'tree'; return; }
   if (k === 'd') { a.full = !a.full; a.cur = a.full ? firstChange(docA()) : 0; a.vtop = Math.max(0, a.cur - 5); return; }
   if (a.focus === 'tree') {
     const rows = flatTree(), r = rows[a.sel];
@@ -404,7 +373,6 @@ function keyA(k) {
 function keyB(k) {
   const b = st.b, list = data.changedList;
   const jump = (p) => { const i = docB().findIndex((r) => r.k === 'file' && r.p === p); if (i >= 0) { b.cur = i; b.top = i; } };
-  if (k === 'tab') { b.focus = b.focus === 'list' ? 'view' : 'list'; return; }
   const doc = docB();
   if (k === 'v') {
     const p = b.focus === 'list' ? list[b.sel] : doc[b.cur]?.p;
@@ -422,33 +390,6 @@ function keyB(k) {
   if (k === 'left' || k === 'esc') { b.focus = 'list'; return; }
   const m = move(doc, b.cur, k, st.pageH);
   if (m !== null) b.cur = m; else docKey(doc, b.cur, k);
-}
-
-function keyC(k) {
-  const c = st.c;
-  if (c.screen === 'file') {
-    if (k === 'left' || k === 'esc' || k === 'bs') { c.screen = 'browse'; return; }
-    if (k === 'd') { c.full = !c.full; c.cur = firstChange(docC()); c.vtop = Math.max(0, c.cur - 5); return; }
-    const doc = docC();
-    const m = move(doc, c.cur, k, st.pageH);
-    if (m !== null) c.cur = m; else docKey(doc, c.cur, k);
-    return;
-  }
-  const entries = browseEntries();
-  const m = move(entries, c.sel, k, st.pageH);
-  if (m !== null) { c.sel = m; return; }
-  const e = entries[c.sel];
-  const up = k === 'left' || k === 'bs' || k === 'esc' || ((k === 'enter' || k === 'right') && e === '..');
-  if (up) {
-    if (!c.dir) return;
-    const from = c.dir;
-    c.dir = path.dirname(c.dir) === '.' ? '' : path.dirname(c.dir);
-    c.sel = browseEntries().findIndex((x) => x !== '..' && x.path === from);
-    c.top = 0;
-  } else if ((k === 'enter' || k === 'right') && e) {
-    if (e.dir) Object.assign(c, { dir: e.path, sel: 0, top: 0 });
-    else { Object.assign(c, { path: e.path, screen: 'file' }); c.cur = firstChange(docC()); c.vtop = Math.max(0, c.cur - 5); }
-  }
 }
 
 function agents() {
@@ -523,12 +464,47 @@ function handle(raw) {
     return;
   }
   if (k === 'q') return quit();
-  if (k === '1' || k === '2' || k === '3') { st.variant = +k; return; }
+  if (k === 'tab' || (k === '1' && st.variant === 2) || (k === '2' && st.variant === 1)) { toggleMode(); return; }
   if (k === 's') return openSend();
   if (k === 'p') { if (comments.length) st.preview = { lines: compose().split('\n'), top: 0 }; else flash('No comments yet'); return; }
   if (k === 'r') { reload(true); return; }
   if (k === 'f') { st.onlyChanged = !st.onlyChanged; return; }
-  [keyA, keyB, keyC][st.variant - 1](k);
+  [keyA, keyB][st.variant - 1](k);
+}
+
+// Explorer and Review share one cursor: switching keeps the file, and the line when it exists in both.
+function sameRow(doc, r) {
+  if (!r) return -1;
+  const a = anchorOf(r);
+  return doc.findIndex((x) => x.p === r.p && (a ? x.k === r.k && anchorOf(x)?.line === a.line : x.k === 'file'));
+}
+function revealA(p) {
+  for (let d = path.dirname(p); d !== '.'; d = path.dirname(d)) st.expanded.add(d);
+  st.a.path = p;
+  st.a.sel = Math.max(0, flatTree().findIndex((x) => x.node.path === p));
+}
+function toggleMode() {
+  if (st.variant === 1) {
+    const r = docA()[st.a.cur];
+    st.variant = 2;
+    const doc = docB();
+    let i = st.a.focus === 'view' ? sameRow(doc, r) : -1;
+    if (i < 0 && st.a.path) i = doc.findIndex((x) => x.k === 'file' && x.p === st.a.path);
+    if (i >= 0) { st.b.cur = i; st.b.top = Math.max(0, i - 5); }
+    st.b.focus = st.a.focus === 'tree' ? 'list' : 'view';
+    if (st.a.path && data.changed.has(st.a.path)) st.b.sel = data.changedList.indexOf(st.a.path);
+    flash('Review: every changed file, stacked');
+  } else {
+    const r = st.b.focus === 'list' ? { k: 'file', p: data.changedList[st.b.sel] } : docB()[st.b.cur];
+    st.variant = 1;
+    if (r?.p) {
+      revealA(r.p);
+      st.a.cur = Math.max(0, sameRow(docA(), r));
+      st.a.vtop = Math.max(0, st.a.cur - 5);
+    }
+    st.a.focus = st.b.focus === 'list' ? 'tree' : 'view';
+    flash('Explorer: browse the whole project');
+  }
 }
 
 // ---------- main ----------
