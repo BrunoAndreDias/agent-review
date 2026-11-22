@@ -3,6 +3,7 @@
 One Node script with no dependencies. It has two modes, and Tab switches between them while keeping the same file and line. It exists to try the design. It is not the start of the real code.
 
 ```sh
+npm install --prefix prototypes/layouts
 node prototypes/layouts/review.js <repo> [--base <ref>] [--dry-run]
 ```
 
@@ -18,3 +19,5 @@ Modes:
 A third layout, Reader, was tried and dropped in favor of these two.
 
 Mouse: click a folder to open or close it, click a file to show it, and click a line to put the cursor on it. In Review, click a file in the list to jump to its diff. Click a comment in Explorer's drawer to jump to it, and click a mode name in the header to switch modes. The scroll wheel scrolls the pane under the pointer and leaves the selected file alone. Mouse mode takes over the terminal's own text selection, so hold Option (macOS) while dragging to select text.
+
+Theme: the colors copy VS Code's Dark Modern theme. Code is highlighted with [Shiki](https://shiki.style), which uses VS Code's own grammars and the Dark+ token colors that Dark Modern uses. It needs a terminal with 24-bit color. Without Shiki installed, code shows in one color.

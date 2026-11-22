@@ -44,6 +44,7 @@ function load(sig) {
   for (const p of changed.keys()) files.add(p);
   data = { changed, untracked, changedList: [...changed.keys()].sort(), tree: buildTree([...files].sort(), changed), sig: sig ?? signature() };
   cache.clear();
+  if (typeof tokCache !== 'undefined') tokCache.clear();
 }
 
 function readText(abs) {
@@ -169,59 +170,134 @@ const st = {
 };
 const flash = (m) => { st.msg = m; st.msgAt = Date.now(); };
 
-// ---------- rendering ----------
+// ---------- rendering: VS Code Dark Modern ----------
 const E = '\x1b[', R = '\x1b[0m';
+const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)).join(';');
+const fg = (h) => `${E}38;2;${rgb(h)}m`;
+const bg = (h) => `${E}48;2;${rgb(h)}m`;
+// Values from VS Code's Dark Modern theme. Diff backgrounds are its 20% overlays blended onto #1F1F1F.
+const T = {
+  editorBg: '#1F1F1F', sideBg: '#181818', border: '#2B2B2B', fg: '#CCCCCC', codeFg: '#D4D4D4', dim: '#9D9D9D',
+  lineNo: '#6E7681', lineNoActive: '#CCCCCC', lineHl: '#282828', accent: '#0078D4', link: '#3794FF',
+  selBg: '#04395E', selInactiveBg: '#37373D', addBg: '#373D29', delBg: '#4B1818', addGutter: '#2EA043', delGutter: '#F85149',
+  M: '#E2C08D', A: '#73C991', D: '#C74E39', R: '#73C991', widgetBg: '#252526', inputBg: '#313131', quickBg: '#222222',
+};
 const C = {
-  add: E + '48;5;22m', del: E + '48;5;52m', hunk: E + '36m', cmt: E + '48;5;17m' + E + '38;5;225m',
-  file: E + '1m' + E + '48;5;236m', title: E + '1m' + E + '48;5;235m', dim: E + '2m', border: E + '38;5;240m',
-  bold: E + '1m', on: E + '7m' + E + '1m', M: E + '33m', A: E + '32m', D: E + '31m', R: E + '36m',
-  mark: E + '38;5;214m', markDim: E + '38;5;244m', badge: E + '35m', bar: E + '48;5;234m', warn: E + '1m' + E + '33m',
+  side: bg(T.sideBg) + fg(T.fg), editor: bg(T.editorBg) + fg(T.codeFg), hunk: bg(T.editorBg) + fg(T.dim) + E + '3m',
+  section: bg(T.sideBg) + fg(T.fg) + E + '1m', file: bg(T.sideBg) + fg(T.fg) + E + '1m', title: bg(T.editorBg) + fg(T.dim),
+  status: bg(T.sideBg) + fg(T.dim), flash: bg(T.accent) + fg('#FFFFFF'), input: bg(T.inputBg) + fg(T.fg),
+  quick: bg(T.quickBg) + fg(T.fg), quickTitle: bg(T.quickBg) + fg(T.fg) + E + '1m', border: bg(T.editorBg) + fg(T.border),
 };
 const fit = (s, w) => { s = s.replace(/\t/g, '  '); return w <= 0 ? '' : s.length > w ? s.slice(0, w - 1) + '…' : s.padEnd(w); };
 const tail = (s, w) => (s.length > w ? '…' + s.slice(s.length - w + 1) : s);
 const paint = (s, w, style = '') => style + fit(s, w) + R;
-const paintSel = (s, w, style, sel, focused = true) =>
-  sel ? (focused ? C.mark : C.markDim) + '▌' + R + style + C.bold + fit(s.slice(1), w - 1) + R : paint(s, w, style);
+// A row in the editor: an accent bar in column 0 marks the cursor.
+const paintRow = (s, w, style, sel, focused) =>
+  sel ? style + fg(focused ? T.accent : T.lineNo) + '▌' + R + style + fit(s.slice(1), w - 1) + R : paint(s, w, style);
+// A row in a list: the whole row takes the selection background, like VS Code's lists.
+const listRow = (parts, w, sel, focused, back = T.sideBg) => {
+  let out = bg(sel ? (focused ? T.selBg : T.selInactiveBg) : back), used = 0;
+  for (const [t, color] of parts) {
+    if (used >= w) break;
+    const s = t.length > w - used ? t.slice(0, w - used - 1) + '…' : t;
+    out += fg(color) + s;
+    used += s.length;
+  }
+  return out + ' '.repeat(Math.max(0, w - used)) + R;
+};
 const scroll = (cur, top, h) => (cur < top ? cur : cur >= top + h ? cur - h + 1 : top);
 const clamp = (i, n) => Math.max(0, Math.min(n - 1, i));
 
-function rowText(r) {
-  const num = (x) => String(x ?? '').padStart(5);
-  switch (r.k) {
-    case 'add': return [` ${num(r.n)} + ${r.t}`, C.add];
-    case 'del': return [` ${num(r.o)} - ${r.t}`, C.del];
-    case 'ctx': return [` ${num(r.n)}   ${r.t}`, ''];
-    case 'hunk': return [`       ${r.t}`, C.hunk];
-    case 'cmt': return [`         ▍ ${r.t}`, C.cmt];
-    case 'info': return [`       ${r.t}`, C.dim];
-    case 'file': {
-      const [a, d] = stats(r.p), cc = commentsFor(r.p).length, v = st.viewed.has(r.p);
-      return [` ${v ? '✓' : ' '} ${data.changed.get(r.p)}  ${r.p}   +${a} -${d}${cc ? `   ◆${cc}` : ''}${v ? '   viewed (v to reopen)' : ''}`, C.file];
+// ---------- syntax highlighting (Shiki: VS Code's grammars and the Dark+ token colors Dark Modern uses) ----------
+let hl = null;
+const LANG = {
+  ts: 'typescript', mts: 'typescript', cts: 'typescript', tsx: 'tsx', js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'jsx',
+  json: 'json', jsonc: 'jsonc', md: 'markdown', css: 'css', html: 'html', sh: 'shellscript', bash: 'shellscript', zsh: 'shellscript',
+  py: 'python', rs: 'rust', toml: 'toml', yml: 'yaml', yaml: 'yaml', sql: 'sql', go: 'go',
+};
+async function initHighlighter() {
+  try {
+    const { createHighlighter } = await import('shiki');
+    hl = await createHighlighter({ themes: ['dark-plus'], langs: [...new Set(Object.values(LANG))] });
+  } catch { hl = null; }
+}
+const tokCache = new Map();
+function tokensFor(p, side) {
+  const key = `${side}:${p}`;
+  if (tokCache.has(key)) return tokCache.get(key);
+  let toks = null;
+  const lang = LANG[path.extname(p).slice(1).toLowerCase()];
+  if (hl && lang) {
+    let text = null;
+    try { text = side === 'old' ? git('show', `${BASE}:${p}`) : fs.readFileSync(path.join(root, p), 'utf8'); } catch {}
+    if (text !== null && text.length < 400000) {
+      try { toks = hl.codeToTokensBase(text, { lang, theme: 'dark-plus' }); } catch {}
     }
-    default: return [' ', ''];
+  }
+  tokCache.set(key, toks);
+  return toks;
+}
+function codeSegs(r) {
+  const old = r.k === 'del';
+  const line = tokensFor(r.p, old ? 'old' : 'new')?.[(old ? r.o : r.n) - 1];
+  if (line && line.map((t) => t.content).join('') === r.t) return line.map((t) => [t.content, t.color || T.codeFg, t.fontStyle || 0]);
+  return [[r.t, T.codeFg, 0]];
+}
+function codeLine(r, w, sel, focused) {
+  const back = r.k === 'add' ? T.addBg : r.k === 'del' ? T.delBg : sel ? T.lineHl : T.editorBg;
+  let out = bg(back), used = 0;
+  const put = (t, color, style = 0) => {
+    if (used >= w) return;
+    t = t.replace(/\t/g, '  ');
+    const s = t.length > w - used ? t.slice(0, w - used - 1) + '…' : t;
+    out += fg(color) + (style & 1 ? E + '3m' : '') + (style & 2 ? E + '1m' : '') + s + (style ? E + '22;23m' : '');
+    used += s.length;
+  };
+  put(sel ? '▌' : ' ', focused ? T.accent : T.lineNo);
+  put(String((r.k === 'del' ? r.o : r.n) ?? '').padStart(5) + ' ', sel ? T.lineNoActive : T.lineNo);
+  put(r.k === 'add' ? '+ ' : r.k === 'del' ? '- ' : '  ', r.k === 'add' ? T.addGutter : T.delGutter);
+  for (const [t, c, s] of codeSegs(r)) put(t, c, s);
+  return out + ' '.repeat(Math.max(0, w - used)) + R;
+}
+
+function docLine(r, w, sel, focused) {
+  switch (r.k) {
+    case 'add': case 'del': case 'ctx': return codeLine(r, w, sel, focused);
+    case 'hunk': return paintRow(`        ${r.t}`, w, C.hunk, sel, focused);
+    case 'info': return paintRow(`        ${r.t}`, w, C.hunk, sel, focused);
+    case 'cmt': {
+      const s = bg(T.widgetBg);
+      return s + fg(sel ? T.accent : T.widgetBg) + '▌' + fg(T.accent) + '         ▍ ' + fg(T.fg) + fit(r.t, w - 12) + R;
+    }
+    case 'file': {
+      const [a, d] = stats(r.p), cc = commentsFor(r.p).length, v = st.viewed.has(r.p), s = data.changed.get(r.p);
+      return listRow([[sel ? '▌' : ' ', T.accent], [v ? '✓ ' : '  ', T.A], [`${s}  `, T[s]], [r.p, T.fg], [`   +${a}`, T.A], [` -${d}`, T.D], [cc ? `   ◆${cc}` : '', T.link], [v ? '   viewed, v to reopen' : '', T.dim]], w, false, false, T.sideBg);
+    }
+    default: return paint('', w, C.editor);
   }
 }
 function docLines(doc, cur, top, h, w, focused) {
   const out = [];
   for (let i = 0; i < h; i++) {
     const r = doc[top + i];
-    if (!r) { out.push(paint('', w)); continue; }
-    const [t, s] = rowText(r);
-    out.push(paintSel(t, w, s, top + i === cur, focused));
+    out.push(r ? docLine(r, w, top + i === cur, focused) : paint('', w, C.editor));
   }
   return out;
 }
-function treeLine(n, depth, w, sel, focused, flat = false) {
-  const icon = n.dir ? (!flat && st.expanded.has(n.path) ? '▾ ' : '▸ ') : '  ';
+function treeLine(n, depth, w, sel, focused) {
+  const icon = n.dir ? (st.expanded.has(n.path) ? '⌄ ' : '› ') : '  ';
+  const s = n.dir ? null : data.changed.get(n.path);
+  const color = n.dir ? (n.changed ? T.M : T.fg) : s ? T[s] : T.fg;
   const cc = n.dir ? 0 : commentsFor(n.path).length;
-  const badge = (cc ? `◆${cc} ` : '') + (n.dir ? (n.changed ? `${n.changed}●` : '') : data.changed.get(n.path) || '');
-  const label = ` ${'  '.repeat(depth)}${icon}${n.name}${n.dir ? '/' : ''}`;
-  const style = n.dir ? (n.changed ? C.bold : C.dim) : C[data.changed.get(n.path)] || C.dim;
-  return paintSel(fit(label, w - badge.length - 1) + badge + ' ', w, style, sel, focused);
+  const badge = n.dir ? (n.changed ? '●' : '') : s || '';
+  const label = ` ${'  '.repeat(depth)}${icon}${n.name}`;
+  const right = (cc ? `◆${cc} ` : '') + badge + ' ';
+  return listRow([[fit(label, w - right.length), color], [cc ? `◆${cc} ` : '', T.link], [badge + ' ', color]], w, sel, focused);
 }
 
 const docA = () => (st.a.path ? fileDoc(st.a.path, st.a.full) : []);
 const docB = () => data.changedList.flatMap((p) => [{ k: 'file', p }, ...(st.viewed.has(p) ? [] : fileDoc(p, false)), { k: 'gap', p }]);
+const sep = C.border + '│' + R;
 
 function renderA(W, h) {
   const a = st.a;
@@ -235,18 +311,19 @@ function renderA(W, h) {
   const left = [];
   for (let i = 0; i < mh; i++) {
     const idx = a.top + i, r = rows[idx];
-    left.push(r ? treeLine(r.node, r.depth, lw, idx === a.sel, a.focus === 'tree') : paint('', lw));
+    left.push(r ? treeLine(r.node, r.depth, lw, idx === a.sel, a.focus === 'tree') : paint('', lw, C.side));
   }
   const doc = docA();
   a.cur = clamp(a.cur, doc.length);
   a.vtop = scroll(a.cur, a.vtop, mh - 1);
   st.pageH = mh - 1;
   const mode = a.path && data.changed.has(a.path) ? (a.full ? 'full file' : 'diff') : 'unchanged';
-  const right = [paint(a.path ? ` ${a.path}  ·  ${mode}` : ' Select a file', rw, C.title), ...docLines(doc, a.cur, a.vtop, mh - 1, rw, a.focus === 'view')];
-  const out = left.map((l, i) => l + C.border + '│' + R + right[i]);
+  const crumbs = a.path ? ` ${a.path.split('/').join(' › ')}   ${mode}` : ' Select a file';
+  const right = [paint(crumbs, rw, C.title), ...docLines(doc, a.cur, a.vtop, mh - 1, rw, a.focus === 'view')];
+  const out = left.map((l, i) => l + sep + right[i]);
   if (drawer) {
-    out.push(paint(` Comments (${comments.length})  ·  s send  ·  p preview`, W, C.title));
-    for (const c of comments.slice(-5)) out.push(paint(`   ◆ ${c.p}:${c.line}  ${c.text}`, W, C.badge));
+    out.push(paint(` COMMENTS (${comments.length})   s send · p preview`, W, C.section));
+    for (const c of comments.slice(-5)) out.push(listRow([['   ◆ ', T.link], [`${c.p}:${c.line}  `, T.dim], [c.text, T.fg]], W, false, false));
   }
   return out;
 }
@@ -261,28 +338,35 @@ function renderB(W, h) {
   const curFile = doc[b.cur]?.p;
   if (b.focus === 'view' && curFile) b.sel = list.indexOf(curFile);
   b.sel = clamp(b.sel, list.length);
-  const left = [paint(` Changed files (${list.length})`, lw, C.title)];
+  const left = [paint(` CHANGES (${list.length})`, lw, C.section)];
   const ltop = (b.ltop = b.free ? Math.max(0, Math.min(b.ltop || 0, list.length - h + 1)) : scroll(b.sel, b.ltop || 0, h - 1));
   st.geo = { lw, mh: h };
   for (let i = 0; i < h - 1; i++) {
     const idx = ltop + i, p = list[idx];
-    if (!p) { left.push(paint(list.length || i ? '' : '  No changes against base', lw, C.dim)); continue; }
-    const [a, d] = stats(p), cc = commentsFor(p).length, v = st.viewed.has(p);
-    const right = `${cc ? `◆${cc} ` : ''}+${a} -${d} `;
-    left.push(paintSel(fit(` ${v ? '✓' : ' '} ${data.changed.get(p)} ${tail(p, lw - right.length - 6)}`, lw - right.length) + right, lw, v ? C.dim : C[data.changed.get(p)] || '', idx === b.sel, b.focus === 'list'));
+    if (!p) { left.push(paint(list.length || i ? '' : '  No changes against base', lw, C.side)); continue; }
+    const [a, d] = stats(p), cc = commentsFor(p).length, v = st.viewed.has(p), s = data.changed.get(p);
+    const right = `${cc ? `◆${cc} ` : ''}+${a} -${d} ${s} `;
+    const name = path.basename(p), dir = path.dirname(p) === '.' ? '' : path.dirname(p);
+    const avail = lw - right.length - 3;
+    const shown = name.length > avail ? name.slice(0, Math.max(0, avail - 1)) + '…' : name;
+    const dirPart = dir && avail - shown.length - 2 > 4 ? ' ' + tail(dir, avail - shown.length - 2) : '';
+    const pad = ' '.repeat(Math.max(0, avail - shown.length - dirPart.length));
+    left.push(listRow([[v ? ' ✓ ' : '   ', T.A], [shown, v ? T.dim : T[s]], [dirPart + pad, T.dim], [cc ? `◆${cc} ` : '', T.link], [`+${a} `, T.A], [`-${d} `, T.D], [`${s} `, T[s]]], lw, idx === b.sel, b.focus === 'list'));
   }
   const right = docLines(doc, b.cur, b.top, h, rw, b.focus === 'view');
-  return left.map((l, i) => l + C.border + '│' + R + right[i]);
+  return left.map((l, i) => l + sep + right[i]);
 }
 
+// Column positions here are also the mouse targets: Explorer is columns 15-24, Review 25-32.
 function header(W) {
   const names = ['Explorer', 'Review'];
   const left = ' agent-review ';
-  const tabs = names.map((n) => ` ${n} `);
   const right = ` ${project} · base ${BASE.slice(0, 7)} · ${data.changedList.length} changed · ${comments.length} comments${st.onlyChanged ? ' · changed only' : ''} `;
-  const used = left.length + tabs.join('').length;
-  const gap = Math.max(1, W - used - right.length);
-  return C.title + left + R + tabs.map((t, i) => (i + 1 === st.variant ? C.on : C.title) + t + R).join('') + paint(' '.repeat(gap) + right, W - used, C.title);
+  const tabs = names.map((n, i) => (i + 1 === st.variant
+    ? bg(T.editorBg) + fg(T.accent) + '▎' + fg('#FFFFFF') + `${n} `
+    : bg(T.sideBg) + fg(T.dim) + ` ${n} `) + R);
+  const used = left.length + names.reduce((s, n) => s + n.length + 2, 0);
+  return C.status + left + R + tabs.join('') + paint(' '.repeat(Math.max(1, W - used - right.length)) + right, W - used, C.status);
 }
 
 const HINTS = {
@@ -293,24 +377,24 @@ function footer(W) {
   if (st.input) {
     const i = st.input;
     const where = i.edit ? `edit ${i.edit.p}:${i.edit.line}` : `${i.anchor.p}:${i.anchor.line}`;
-    return paint(` ✎ ${where} › ${i.text}▏   enter save · esc cancel`, W, C.title);
+    return bg(T.inputBg) + fg(T.accent) + '▌' + paint(`✎ ${where} › ${i.text}▏   enter save · esc cancel`, W - 1, C.input);
   }
-  if (st.msg) return paint(` ${st.msg}`, W, C.warn);
-  return paint(` ${HINTS[st.variant]}`, W, C.dim);
+  if (st.msg) return paint(` ${st.msg}`, W, C.flash);
+  return paint(` ${HINTS[st.variant]}`, W, C.status);
 }
 
 function frame(W, H) {
   if (st.preview) {
     const pv = st.preview;
     pv.top = clamp(pv.top, pv.lines.length);
-    const body = pv.lines.slice(pv.top, pv.top + H - 2).map((l) => paint(' ' + l, W));
-    while (body.length < H - 2) body.push(paint('', W));
-    return [paint(' Message the agent will receive', W, C.title), ...body, paint(' j/k scroll · s send · esc close', W, C.title)];
+    const body = pv.lines.slice(pv.top, pv.top + H - 2).map((l) => paint(' ' + l, W, C.editor));
+    while (body.length < H - 2) body.push(paint('', W, C.editor));
+    return [paint(' Message the agent will receive', W, C.section), ...body, paint(' j/k scroll · s send · esc close', W, C.status)];
   }
   const lines = [header(W), ...[renderA, renderB][st.variant - 1](W, H - 2), footer(W)];
   if (st.picker) {
     const p = st.picker;
-    const box = [paint(` ${p.title}   enter choose · esc cancel`, W, C.title), ...p.items.map((it, i) => paintSel(`   ${it.label}`, W, C.bar, i === p.sel)), paint('', W, C.bar)];
+    const box = [paint(` ${p.title}   enter choose · esc cancel`, W, C.quickTitle), ...p.items.map((it, i) => listRow([[`   ${it.label}`, T.fg]], W, i === p.sel, true, T.quickBg)), paint('', W, C.quick)];
     const y0 = Math.max(1, Math.floor((H - box.length) / 2));
     st.geo.py = y0;
     box.forEach((l, i) => { if (y0 + i < H - 1) lines[y0 + i] = l; });
@@ -589,6 +673,15 @@ load();
 const TOKEN_RE = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-D]|\x1b|[\s\S]/g;
 const TOK = { down: '\x1b[B', up: '\x1b[A', left: '\x1b[D', right: '\x1b[C', enter: '\r', tab: '\t', esc: '\x1b', bs: '\x7f', space: ' ' };
 
+const tty = process.stdout;
+function quit() {
+  tty.write('\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l');
+  if (comments.length) console.log('Unsent review comments:\n\n' + compose());
+  process.exit(0);
+}
+
+(async () => {
+await initHighlighter();
 if (has('--snapshot')) {
   const W = +(opt('--cols') || 120), H = +(opt('--rows') || 32);
   frame(W, H);
@@ -603,13 +696,10 @@ if (has('--snapshot')) {
   console.log(out);
   process.exit(0);
 }
+startTty();
+})();
 
-const tty = process.stdout;
-function quit() {
-  tty.write('\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l');
-  if (comments.length) console.log('Unsent review comments:\n\n' + compose());
-  process.exit(0);
-}
+function startTty() {
 const draw = () => tty.write('\x1b[H' + frame(tty.columns || 100, tty.rows || 30).join('\r\n'));
 tty.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1006h');
 process.stdin.setRawMode(true);
@@ -622,3 +712,4 @@ setInterval(() => {
   if (st.msg && Date.now() - st.msgAt > 4000) { st.msg = ''; draw(); }
 }, 2000);
 draw();
+}
