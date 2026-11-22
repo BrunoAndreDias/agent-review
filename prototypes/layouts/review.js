@@ -8,7 +8,9 @@ const path = require('path');
 const argv = process.argv.slice(2);
 const opt = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
 const has = (n) => argv.includes(n);
-const root = path.resolve(argv[0] && !argv[0].startsWith('--') ? argv[0] : '.');
+let root = path.resolve(argv[0] && !argv[0].startsWith('--') ? argv[0] : '.');
+// Started from a subfolder (herdr passes the focused pane's folder), review the whole repo.
+try { root = execFileSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch {}
 const project = path.basename(root);
 const DRY = has('--snapshot') || has('--dry-run');
 
