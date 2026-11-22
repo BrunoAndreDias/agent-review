@@ -16,3 +16,5 @@ Modes:
 2. Review is for the final pass. It lists the changed files on the left and stacks every diff on the right, like GitHub's "Files changed" tab. `v` marks a file viewed and folds it.
 
 A third layout, Reader, was tried and dropped in favor of these two.
+
+Mouse: click a folder to open or close it, click a file to show it, and click a line to put the cursor on it. In Review, click a file in the list to jump to its diff. Click a comment in Explorer's drawer to jump to it, and click a mode name in the header to switch modes. The scroll wheel scrolls the pane under the pointer and leaves the selected file alone. Mouse mode takes over the terminal's own text selection, so hold Option (macOS) while dragging to select text.

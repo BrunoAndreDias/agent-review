@@ -230,7 +230,8 @@ function renderA(W, h) {
   const lw = Math.max(24, Math.min(44, Math.floor(W * 0.3))), rw = W - lw - 1;
   const rows = flatTree();
   a.sel = clamp(a.sel, rows.length);
-  a.top = scroll(a.sel, a.top, mh);
+  a.top = a.free ? Math.max(0, Math.min(a.top, rows.length - mh)) : scroll(a.sel, a.top, mh);
+  st.geo = { lw, mh };
   const left = [];
   for (let i = 0; i < mh; i++) {
     const idx = a.top + i, r = rows[idx];
@@ -261,7 +262,8 @@ function renderB(W, h) {
   if (b.focus === 'view' && curFile) b.sel = list.indexOf(curFile);
   b.sel = clamp(b.sel, list.length);
   const left = [paint(` Changed files (${list.length})`, lw, C.title)];
-  const ltop = scroll(b.sel, 0, h - 1);
+  const ltop = (b.ltop = b.free ? Math.max(0, Math.min(b.ltop || 0, list.length - h + 1)) : scroll(b.sel, b.ltop || 0, h - 1));
+  st.geo = { lw, mh: h };
   for (let i = 0; i < h - 1; i++) {
     const idx = ltop + i, p = list[idx];
     if (!p) { left.push(paint(list.length || i ? '' : '  No changes against base', lw, C.dim)); continue; }
@@ -310,6 +312,7 @@ function frame(W, H) {
     const p = st.picker;
     const box = [paint(` ${p.title}   enter choose · esc cancel`, W, C.title), ...p.items.map((it, i) => paintSel(`   ${it.label}`, W, C.bar, i === p.sel)), paint('', W, C.bar)];
     const y0 = Math.max(1, Math.floor((H - box.length) / 2));
+    st.geo.py = y0;
     box.forEach((l, i) => { if (y0 + i < H - 1) lines[y0 + i] = l; });
   }
   return lines;
@@ -370,9 +373,72 @@ function keyA(k) {
   if (m !== null) a.cur = m; else docKey(doc, a.cur, k);
 }
 
+function jumpB(p) {
+  const i = docB().findIndex((r) => r.k === 'file' && r.p === p);
+  if (i >= 0) { st.b.cur = i; st.b.top = i; }
+}
+function jumpToComment(c) {
+  if (st.variant !== 1) toggleMode();
+  revealA(c.p);
+  st.a.focus = 'view';
+  let i = docA().findIndex((r) => r.k === 'cmt' && r.c === c);
+  if (i < 0) { st.a.full = true; i = docA().findIndex((r) => r.k === 'cmt' && r.c === c); }
+  st.a.cur = Math.max(0, i);
+  st.a.vtop = Math.max(0, st.a.cur - 5);
+}
+
+// b: 0 left click, 64 wheel up, 65 wheel down. x and y are 1-based terminal cells.
+function mouse(btn, x, y) {
+  const g = st.geo, i = y - 2;
+  const wheel = btn === 64 ? -3 : btn === 65 ? 3 : 0;
+  if (btn !== 0 && !wheel) return;
+  if (st.preview) { st.preview.top += wheel; return; }
+  if (st.picker) {
+    if (wheel) return;
+    const it = st.picker.items[y - g.py - 2];
+    st.picker = null;
+    if (it) it.run();
+    return;
+  }
+  if (st.input) return;
+  if (y === 1) {
+    if (!wheel && ((x >= 15 && x <= 24 && st.variant === 2) || (x >= 25 && x <= 32 && st.variant === 1))) toggleMode();
+    return;
+  }
+  const left = x <= g.lw;
+  if (st.variant === 1) {
+    const a = st.a;
+    if (i >= g.mh) { if (!wheel && i > g.mh) { const c = comments.slice(-5)[i - g.mh - 1]; if (c) jumpToComment(c); } return; }
+    if (left) {
+      if (wheel) { a.top = Math.max(0, a.top + wheel); a.free = true; return; }
+      const rows = flatTree(), r = rows[a.top + i];
+      if (!r) return;
+      Object.assign(a, { sel: a.top + i, focus: 'tree', free: true });
+      if (r.node.dir) toggleDir(r.node.path); else selectA(r);
+      return;
+    }
+    a.focus = 'view';
+    if (wheel) { a.vtop = Math.max(0, a.vtop + wheel); a.cur += wheel; }
+    else if (i >= 1) a.cur = a.vtop + i - 1;
+    return;
+  }
+  const b = st.b;
+  if (left) {
+    if (wheel) { b.ltop = Math.max(0, (b.ltop || 0) + wheel); b.free = true; return; }
+    const p = data.changedList[(b.ltop || 0) + i - 1];
+    if (i < 1 || !p) return;
+    Object.assign(b, { sel: data.changedList.indexOf(p), focus: 'list', free: true });
+    jumpB(p);
+    return;
+  }
+  b.focus = 'view';
+  if (wheel) { b.top = Math.max(0, b.top + wheel); b.cur += wheel; }
+  else b.cur = b.top + i;
+}
+
 function keyB(k) {
   const b = st.b, list = data.changedList;
-  const jump = (p) => { const i = docB().findIndex((r) => r.k === 'file' && r.p === p); if (i >= 0) { b.cur = i; b.top = i; } };
+  const jump = jumpB;
   const doc = docB();
   if (k === 'v') {
     const p = b.focus === 'list' ? list[b.sel] : doc[b.cur]?.p;
@@ -444,6 +510,9 @@ const KEYS = {
   j: 'down', k: 'up', h: 'left', l: 'right', g: 'top', G: 'bottom', ' ': 'pgdn',
 };
 function handle(raw) {
+  const mm = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(raw);
+  if (mm) { if (mm[4] === 'M') mouse(+mm[1], +mm[2], +mm[3]); return; }
+  st.a.free = st.b.free = false;
   if (raw === '\x03') return quit();
   if (st.input) return handleInput(raw);
   const k = KEYS[raw] || raw;
@@ -517,7 +586,7 @@ load();
   if (i >= 0) { st.a.sel = i; st.a.path = rows[i].node.path; }
 })();
 
-const TOKEN_RE = /\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-D]|\x1b|[\s\S]/g;
+const TOKEN_RE = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-D]|\x1b|[\s\S]/g;
 const TOK = { down: '\x1b[B', up: '\x1b[A', left: '\x1b[D', right: '\x1b[C', enter: '\r', tab: '\t', esc: '\x1b', bs: '\x7f', space: ' ' };
 
 if (has('--snapshot')) {
@@ -525,6 +594,7 @@ if (has('--snapshot')) {
   frame(W, H);
   for (const tok of (opt('--keys') || '').split(',').filter(Boolean)) {
     if (tok.startsWith('text:')) for (const ch of tok.slice(5)) handle(ch);
+    else if (/^(click|up|down)@/.test(tok)) { const [w, xy] = tok.split('@'); const [x, y] = xy.split(':'); handle(`\x1b[<${{ click: 0, up: 64, down: 65 }[w]};${x};${y}M`); }
     else handle(TOK[tok] ?? tok);
     frame(W, H);
   }
@@ -536,12 +606,12 @@ if (has('--snapshot')) {
 
 const tty = process.stdout;
 function quit() {
-  tty.write('\x1b[?25h\x1b[?1049l');
+  tty.write('\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l');
   if (comments.length) console.log('Unsent review comments:\n\n' + compose());
   process.exit(0);
 }
 const draw = () => tty.write('\x1b[H' + frame(tty.columns || 100, tty.rows || 30).join('\r\n'));
-tty.write('\x1b[?1049h\x1b[?25l\x1b[2J');
+tty.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1006h');
 process.stdin.setRawMode(true);
 process.stdin.setEncoding('utf8');
 process.stdin.resume();
