@@ -6,7 +6,7 @@ Press `q` twice to quit. `ctrl-c` quits at once.
 
 ```sh
 npm install --prefix prototypes/layouts   # Shiki is loaded from that folder
-node prototypes/line-comments/review.js <repo> [--cui 1|2|3] [--dry-run]
+node prototypes/line-comments/review.js <repo> [--cui 1|2|3] [--target <pane_id>] [--dry-run]
 ```
 
 Picking lines works the same in all three:
@@ -24,3 +24,18 @@ The three styles:
 1. Inline cards. Comments are boxes inserted below their last line, like VS Code's comment widget and GitHub's diff threads. The code below moves down.
 2. Gutter + peek. The code never moves. Comments show only as gutter marks, and while the cursor is on a commented line, a box is drawn over the code below it.
 3. Margin notes. A column beside the code holds each note level with its first line, like comments in Google Docs. The code column gets narrower.
+
+Sending the review to a herdr agent:
+
+- The review is bound to one agent session. `open-pane.sh` passes the pane the review was opened from as `--target`, and the review is bound to the agent in that pane. If no agent runs there, it is bound to the first agent working in this repo. The binding uses the session id, so it follows the agent if herdr renumbers panes.
+- The header shows the bound agent and where the review stands: idle, review queued, working on your review, or done with your review. With nothing bound it shows `no agent`. If the agent stops running it shows `agent gone`.
+- `s` sends the review now if the agent is idle or done. If the agent is working or blocked, `s` queues the review, and it goes out on the first poll that finds the agent idle. The reviewer polls `herdr agent list` every 2 seconds.
+- While a review is queued, `s` sends it now and `u` cancels it. Cancelling keeps the comments.
+- After sending, the header shows the agent working on your review. It shows done once the agent finishes the turn that holds the review. If the agent was working when the review went out, that takes two finished turns.
+- If herdr refuses the review because the agent is blocked on a question, the review stays queued. Any other error keeps the comments.
+- `t` opens the agent picker. It lists the bound agent first, then agents in this repo, then the rest, then "Copy to clipboard" and "Preview message". Choosing an agent binds it and cancels a queued review. `s` opens the same picker when nothing is bound or the bound agent is gone. Choosing an agent there binds it, then sends or queues the review by the same rule.
+- Outside herdr nothing is bound, and the picker holds only "Copy to clipboard" and "Preview message".
+
+`--dry-run` shows what would be sent without sending it. It keeps the comments.
+
+Run the tests with `node --test 'prototypes/line-comments/*.test.js'`. They drive the snapshot mode with `--agents-json <file>` in place of herdr. The key token `agents=<file>` switches that file, and `poll` runs one poll.
