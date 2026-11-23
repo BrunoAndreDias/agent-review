@@ -18,6 +18,15 @@ Picking lines works the same in all three:
 - A single click only moves the cursor. Dragging over the line numbers of two or more lines opens the composer on them. Dragging over the code selects lines without opening it.
 - In the composer, `enter` saves and `shift-enter` starts a new line. `alt-enter` and `ctrl-j` also start a new line. `e` edits the comment under the cursor, `x` deletes it.
 - Lines a comment covers get a `┃` bar, and its first line gets a `◆`.
+- While a new comment opened on one line is open, `↑` and `↓` move the far end of its range, one code line at a time. The line it was opened on stays covered. The range stays in one file and skips `@@` rows. If it spans removed and added lines, it takes the side of its last line. The title and the footer show the range, for example `L1–3`. A comment opened on a `V` selection or a drag keeps its range, and so does a comment being edited.
+- A click on a `@@` row selects that hunk's lines. `c` or `enter` comments on them.
+
+Comments on a whole file:
+
+- `c` on a file in the Explorer tree or the Review changes list opens that file's comment. `c` on a folder does nothing. `C` opens the comment of the file under the cursor, from the code, the tree or the list. `enter` on a file's header row in Review does the same, and so does a click on that row or on the path bar above the code in Explorer.
+- A file has at most one such comment. If it has one, these keys open it for editing.
+- It is drawn as a card titled `whole file` above the file's first hunk, in all three styles. On the card, `e` or `enter` edits it and `x` deletes it. The `◆N` counts include it.
+- In the message it comes first under the file's heading, as "the whole file", before the line comments.
 
 The three styles:
 
@@ -38,4 +47,4 @@ Sending the review to a herdr agent:
 
 `--dry-run` shows what would be sent without sending it. It keeps the comments.
 
-Run the tests with `node --test 'prototypes/line-comments/*.test.js'`. They drive the snapshot mode with `--agents-json <file>` in place of herdr. The key token `agents=<file>` switches that file, and `poll` runs one poll.
+Run the tests with `node --test 'prototypes/line-comments/*.test.js'`. `send.test.js` covers sending and `comments.test.js` covers ranges and file comments. They drive the snapshot mode with `--agents-json <file>` in place of herdr. The key token `agents=<file>` switches that file, and `poll` runs one poll.
