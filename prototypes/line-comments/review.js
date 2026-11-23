@@ -107,9 +107,9 @@ let comments = [];
 const sent = [];
 const anchorOf = (r) => (r.k === 'add' || r.k === 'ctx' ? { side: 'new', line: r.n } : r.k === 'del' ? { side: 'old', line: r.o } : null);
 const commentsFor = (p) => comments.filter((c) => c.p === p);
-// A comment covers lines from..line on one side. It is drawn below `line`.
-const inRange = (c, a) => !!a && c.side === a.side && a.line >= c.from && a.line <= c.line;
-const lineLabel = (c) => (c.from === c.line ? `L${c.line}` : `L${c.from}–${c.line}`);
+// A comment covers lines from..line on one side, drawn below `line`, or a whole file ({ p, file: true }), drawn above its first hunk.
+const inRange = (c, a) => !!a && !c.file && c.side === a.side && a.line >= c.from && a.line <= c.line;
+const lineLabel = (c) => (c.file ? 'whole file' : c.from === c.line ? `L${c.line}` : `L${c.from}–${c.line}`);
 const commentsAt = (r) => { const a = r && anchorOf(r); return a ? commentsFor(r.p).filter((c) => inRange(c, a)) : []; };
 const draftAnchor = () => st.input && (st.input.anchor || st.input.edit);
 const CUI = { 1: 'Inline cards', 2: 'Gutter + peek', 3: 'Margin notes' };
@@ -135,6 +135,8 @@ function fileDoc(p, full) {
   const cs = commentsFor(p);
   const inp = st.input;
   const rows = (c, draft) => cardBox(c, draft, boxW(st.docW), false).map((_, n) => ({ k: 'box', p, c, draft, n }));
+  for (const c of cs) if (c.file) out.push(...rows(c, inp?.edit === c));
+  if (inp && !inp.edit && inp.anchor.file && inp.anchor.p === p) out.push(...rows(null, true));
   for (const r of rowsFor(p, full)) {
     out.push({ ...r, p });
     const a = st.cui === 1 && anchorOf(r);
@@ -152,7 +154,8 @@ function compose() {
   const out = [`Review of your changes in ${project}. Please address each comment:`, ''];
   for (const [p, cs] of by) {
     out.push(`## ${p}`);
-    for (const c of cs.sort((x, y) => x.from - y.from)) {
+    for (const c of cs.sort((x, y) => (x.file ? 0 : x.from) - (y.file ? 0 : y.from))) {
+      if (c.file) { out.push('- the whole file:'); for (const l of c.text.split('\n')) out.push(`  ${l}`); continue; }
       const where = c.from === c.line ? `line ${c.line}` : `lines ${c.from}-${c.line}`;
       out.push(`- ${where}${c.side === 'old' ? ' (removed, old numbering)' : ''}: \`${c.snippet.slice(0, 120)}\``);
       for (const l of c.text.split('\n')) out.push(`  ${l}`);
@@ -338,9 +341,11 @@ function visRange(doc, cur) {
   if (!st.vis || doc[st.vis.i]?.p !== doc[cur]?.p) return null;
   return [Math.min(st.vis.i, cur), Math.max(st.vis.i, cur)];
 }
+// Margin notes take a column on the right; cards in the code use what is left.
+const marginW = (w) => (st.cui === 3 ? Math.max(26, Math.min(46, Math.floor(w * 0.34))) : 0);
+const codeW = (w) => (marginW(w) ? w - marginW(w) - 1 : w);
 function docLines(doc, cur, top, h, w, focused) {
-  const mw = st.cui === 3 ? Math.max(26, Math.min(46, Math.floor(w * 0.34))) : 0;
-  const cw = mw ? w - mw - 1 : w;
+  const mw = marginW(w), cw = codeW(w);
   st.activeC = doc[cur]?.c || commentsAt(doc[cur])[0] || null;
   const vr = visRange(doc, cur);
   const out = [];
@@ -357,6 +362,7 @@ function docLines(doc, cur, top, h, w, focused) {
 function overlayPeek(out, doc, cur, top, h, w, focused) {
   const bw = boxW(w);
   let lines = [], idx;
+  if (st.input?.anchor?.file || st.input?.edit?.file || doc[cur]?.k === 'box') return;
   if (st.input) {
     const an = draftAnchor();
     idx = doc.findIndex((r) => r.p === an.p && anchorOf(r)?.side === an.side && anchorOf(r)?.line === an.line);
@@ -420,7 +426,7 @@ function renderA(W, h) {
   const drawer = comments.length ? Math.min(comments.length, 5) + 1 : 0;
   const mh = h - drawer;
   const lw = Math.max(24, Math.min(44, Math.floor(W * 0.3))), rw = W - lw - 1;
-  st.docW = rw;
+  st.docW = codeW(rw);
   const rows = flatTree();
   a.sel = clamp(a.sel, rows.length);
   a.top = a.free ? Math.max(0, Math.min(a.top, rows.length - mh)) : scroll(a.sel, a.top, mh);
@@ -448,7 +454,7 @@ function renderA(W, h) {
 function renderB(W, h) {
   const b = st.b, list = data.changedList;
   const lw = Math.max(24, Math.min(48, Math.floor(W * 0.32))), rw = W - lw - 1;
-  st.docW = rw;
+  st.docW = codeW(rw);
   const doc = docB();
   b.cur = clamp(b.cur, doc.length);
   b.top = scroll(b.cur, b.top, h);
@@ -492,14 +498,15 @@ function header(W) {
 }
 
 const HINTS = {
-  1: 'tab Review · qq quit · ↑↓ move · enter open · ← back · d diff/full · enter/double-click comment or hide · c comment · V select lines · e edit · x delete · m comment style · n next change · f changed only · s send · t target · u cancel queued',
-  2: 'tab Explorer · qq quit · ↑↓ move · ←→ files/diffs · v mark viewed · enter/double-click comment or hide · c comment · V select lines · e edit · x delete · m style · n next change · s send · t target · u cancel queued · p preview',
+  1: 'tab Review · qq quit · ↑↓ move · enter open · ← back · d diff/full · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · m comment style · n next change · f changed only · s send · t target · u cancel queued',
+  2: 'tab Explorer · qq quit · ↑↓ move · ←→ files/diffs · v mark viewed · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · m style · n next change · s send · t target · u cancel queued · p preview',
 };
 function footer(W) {
   if (st.input) {
     const i = st.input;
     const an = draftAnchor();
-    return bg(T.inputBg) + fg(T.accent) + '▌' + paint(`✎ ${i.edit ? 'Editing' : 'Commenting on'} ${an.p} ${lineLabel(an)}   enter save · shift-enter new line · esc cancel`, W - 1, C.input);
+    const grow = i.grow !== undefined ? ' · ↑↓ cover more or fewer lines' : '';
+    return bg(T.inputBg) + fg(T.accent) + '▌' + paint(`✎ ${i.edit ? 'Editing' : 'Commenting on'} ${an.p} ${lineLabel(an)}   enter save · shift-enter new line${grow} · esc cancel`, W - 1, C.input);
   }
   if (st.msg) return paint(` ${st.msg}`, W, C.flash);
   if (st.vis) return paint(' Selecting lines · ↑↓ extend · enter or c to comment on the selection · esc cancel', W, C.flash);
@@ -543,17 +550,54 @@ function move(list, cur, k, page) {
 const firstChange = (doc) => Math.max(0, doc.findIndex(isChange));
 
 // The lines a new comment covers: the V/drag selection if there is one, else the cursor line.
-function selRange(doc, cur) {
-  const vr = visRange(doc, cur) || [cur, cur];
-  const rows = doc.slice(vr[0], vr[1] + 1).filter((r) => anchorOf(r));
+const selRange = (doc, cur) => rangeOf(doc, ...(visRange(doc, cur) || [cur, cur]));
+function rangeOf(doc, i, j) {
+  const rows = doc.slice(Math.min(i, j), Math.max(i, j) + 1).filter((r) => anchorOf(r));
   if (!rows.length) return null;
   const side = anchorOf(rows[rows.length - 1]).side;
   const mine = rows.filter((r) => anchorOf(r).side === side);
   const lines = mine.map((r) => anchorOf(r).line);
   return { p: mine[0].p, side, from: Math.min(...lines), line: Math.max(...lines), snippet: mine[0].t.trim() + (mine.length > 1 ? ' …' : '') };
 }
+const curIdx = () => (st.variant === 1 ? st.a.cur : st.b.cur);
+function commentFile(p) {
+  if (!p) return;
+  const have = comments.find((c) => c.file && c.p === p);
+  st.vis = null;
+  st.input = have ? { text: have.text, edit: have } : { text: '', anchor: { p, file: true } };
+  // Put the cursor on the card so it is in view, without moving focus out of the tree or list.
+  const i = curDoc().findIndex((r) => r.k === 'box' && r.draft && r.p === p);
+  if (i >= 0) { if (st.variant === 1) st.a.cur = i; else st.b.cur = i; }
+}
+function selectHunk(doc, i) {
+  let last = -1;
+  for (let j = i + 1; doc[j] && doc[j].p === doc[i].p && (anchorOf(doc[j]) || doc[j].k === 'box'); j++) if (anchorOf(doc[j])) last = j;
+  if (last < 0) return;
+  st.vis = { i: i + 1 };
+  setCur(last);
+  flash(`Hunk selected, ${doc.slice(i + 1, last + 1).filter(anchorOf).length} lines · c or enter to comment`);
+}
+// While a new comment is open, ↑↓ move the far end of its range. The line it was opened on stays covered.
+function growDraft(k) {
+  const inp = st.input, doc = curDoc(), step = k === 'up' ? -1 : 1, p = doc[inp.grow].p;
+  let j = curIdx() + step;
+  while (doc[j] && doc[j].p === p && doc[j].k !== 'file' && !anchorOf(doc[j])) j += step;
+  if (!doc[j] || doc[j].p !== p || !anchorOf(doc[j])) return;
+  const an = rangeOf(doc, inp.grow, j);
+  if (!an) return;
+  // The draft card sits below the range, so it moves when the range does. Find both lines again by their anchors.
+  const at = (x) => (y) => y.p === x.p && y.k === x.k && anchorOf(y)?.line === anchorOf(x).line;
+  const fixed = doc[inp.grow], end = doc[j];
+  inp.anchor = an;
+  const now = curDoc();
+  inp.grow = now.findIndex(at(fixed));
+  setCur(now.findIndex(at(end)));
+}
+
 // Enter or double-click on a line: no comment there opens the composer; a comment there is hidden or shown.
 function toggleLine(doc, i) {
+  if (st.vis) return docKey(doc, i, 'c');
+  if (doc[i]?.k === 'file') return commentFile(doc[i].p);
   if (doc[i] && doc[i].k !== 'box' && !anchorOf(doc[i])) {
     const j = doc.findIndex((x, n) => n > i && anchorOf(x));
     if (j < 0) return;
@@ -561,7 +605,8 @@ function toggleLine(doc, i) {
   }
   const r = doc[i];
   if (!r) return;
-  const cs = st.vis ? [] : r.c ? [r.c] : commentsAt(r);
+  if (r.c?.file) return commentFile(r.p);
+  const cs = r.c ? [r.c] : commentsAt(r);
   if (!cs.length) return docKey(doc, i, 'c');
   const hide = !cs.every((c) => c.hidden);
   for (const c of cs) c.hidden = hide;
@@ -576,12 +621,15 @@ function docKey(doc, cur, k) {
   if (!r) return;
   const here = r.c || commentsAt(r)[0];
   if (k === 'V') { st.vis = st.vis ? null : { i: cur }; return; }
+  if (k === 'C') return commentFile(r.p);
   if (k === 'c') {
     if (r.k === 'box' && r.c) { st.input = { text: r.c.text, edit: r.c }; return; }
+    if (r.k === 'file') return commentFile(r.p);
+    const grow = st.vis ? undefined : cur;
     const an = selRange(doc, cur);
     st.vis = null;
     if (!an) return flash('Move to a code line to comment');
-    st.input = { text: '', anchor: an };
+    st.input = { text: '', anchor: an, grow };
   } else if (k === 'e' && here) st.input = { text: here.text, edit: here };
   else if (k === 'x' && here) { comments = comments.filter((c) => c !== here); flash('Comment deleted'); }
 }
@@ -605,6 +653,7 @@ function keyA(k) {
     if (m !== null) { a.sel = m; selectA(rows[m]); return; }
     if (!r) return;
     if (k === 'enter' || k === 'right') { if (r.node.dir) toggleDir(r.node.path, k === 'right'); else a.focus = 'view'; }
+    else if ((k === 'c' || k === 'C') && !r.node.dir) { selectA(r); commentFile(r.node.path); }
     else if (k === 'left') {
       if (r.node.dir && st.expanded.has(r.node.path)) st.expanded.delete(r.node.path);
       else { const pi = rows.findIndex((x) => x.node.path === path.dirname(r.node.path)); if (pi >= 0) a.sel = pi; }
@@ -626,7 +675,7 @@ function jumpToComment(c) {
   if (st.variant !== 1) toggleMode();
   revealA(c.p);
   st.a.focus = 'view';
-  const at = (r) => r.p === c.p && anchorOf(r)?.side === c.side && anchorOf(r)?.line === c.line;
+  const at = c.file ? (r) => r.c === c : (r) => r.p === c.p && anchorOf(r)?.side === c.side && anchorOf(r)?.line === c.line;
   let i = docA().findIndex(at);
   if (i < 0) { st.a.full = true; i = docA().findIndex(at); }
   st.a.cur = Math.max(0, i);
@@ -657,6 +706,13 @@ function mouse(btn, x, y, release) {
     return;
   }
   if (release || btn === 32) return;
+  if (btn === 0 && !st.input && !st.picker && !st.preview) {
+    const doc = curDoc();
+    if (st.variant === 1 && y === 2 && x > st.geo.lw + 1 && st.a.path) return commentFile(st.a.path);
+    const pr = paneRow(x, y), r = pr && doc[pr.idx];
+    if (r?.k === 'hunk') return selectHunk(doc, pr.idx);
+    if (r?.k === 'file') { setCur(pr.idx); return commentFile(r.p); }
+  }
   if (btn === 0 && !st.picker && !st.preview) {
     const pr = paneRow(x, y), doc = curDoc(), now = Date.now(), lc = st.lastClick;
     const dbl = !!pr && !!lc && lc.idx === pr.idx && lc.variant === st.variant && now - lc.t < 500;
@@ -731,6 +787,7 @@ function keyB(k) {
     const m = move(list, b.sel, k, st.pageH);
     if (m !== null) { b.sel = m; jump(list[m]); return; }
     if (k === 'enter' || k === 'right') b.focus = 'view';
+    else if (k === 'c' || k === 'C') commentFile(list[b.sel]);
     return;
   }
   if (k === 'left' || k === 'esc') { b.focus = 'list'; return; }
@@ -860,6 +917,7 @@ function reload(manual) {
 
 function handleInput(raw) {
   const inp = st.input;
+  if (inp.grow !== undefined && raw.startsWith('\x1b') && (KEYS[raw] === 'up' || KEYS[raw] === 'down')) return growDraft(KEYS[raw]);
   if (raw === '\n') { inp.text += '\n'; return; }
   if (raw === '\r') {
     const t = inp.text.trim();
