@@ -107,7 +107,7 @@ let comments = [];
 const sent = [];
 const anchorOf = (r) => (r.k === 'add' || r.k === 'ctx' ? { side: 'new', line: r.n } : r.k === 'del' ? { side: 'old', line: r.o } : null);
 const commentsFor = (p) => comments.filter((c) => c.p === p);
-// A comment covers lines from..line on one side. It hangs below `line`.
+// A comment covers lines from..line on one side. It is drawn below `line`.
 const inRange = (c, a) => !!a && c.side === a.side && a.line >= c.from && a.line <= c.line;
 const lineLabel = (c) => (c.from === c.line ? `L${c.line}` : `L${c.from}–${c.line}`);
 const commentsAt = (r) => { const a = r && anchorOf(r); return a ? commentsFor(r.p).filter((c) => inRange(c, a)) : []; };
@@ -139,7 +139,7 @@ function fileDoc(p, full) {
     out.push({ ...r, p });
     const a = st.cui === 1 && anchorOf(r);
     if (!a) continue;
-    for (const c of cs) if (c.side === a.side && c.line === a.line && (!c.folded || inp?.edit === c)) out.push(...rows(c, inp?.edit === c));
+    for (const c of cs) if (c.side === a.side && c.line === a.line && (!c.hidden || inp?.edit === c)) out.push(...rows(c, inp?.edit === c));
     const an = inp && !inp.edit && inp.anchor;
     if (an && an.p === p && an.side === a.side && an.line === a.line) out.push(...rows(null, true));
   }
@@ -353,7 +353,7 @@ function docLines(doc, cur, top, h, w, focused) {
   return out;
 }
 
-// Gutter + peek: nothing is inserted into the code. The cursor's comments float over the lines below it.
+// Gutter + peek: nothing is inserted into the code. The cursor's comments are drawn over the lines below it.
 function overlayPeek(out, doc, cur, top, h, w, focused) {
   const bw = boxW(w);
   let lines = [], idx;
@@ -362,7 +362,7 @@ function overlayPeek(out, doc, cur, top, h, w, focused) {
     idx = doc.findIndex((r) => r.p === an.p && anchorOf(r)?.side === an.side && anchorOf(r)?.line === an.line);
     lines = cardBox(st.input.edit || null, true, bw, true);
   } else {
-    const cs = focused ? commentsAt(doc[cur]).filter((c) => !c.folded) : [];
+    const cs = focused ? commentsAt(doc[cur]).filter((c) => !c.hidden) : [];
     if (!cs.length) return;
     idx = cur;
     for (const c of cs) lines.push(...cardBox(c, false, bw, true));
@@ -380,7 +380,7 @@ function marginLines(doc, top, h, mw) {
   for (let i = 0; i < h; i++) {
     const r = doc[top + i], a = r && anchorOf(r);
     if (!a) continue;
-    for (const c of commentsFor(r.p)) if (c.side === a.side && c.from === a.line && (!c.folded || inp?.edit === c)) blocks.push({ i, c, draft: inp?.edit === c });
+    for (const c of commentsFor(r.p)) if (c.side === a.side && c.from === a.line && (!c.hidden || inp?.edit === c)) blocks.push({ i, c, draft: inp?.edit === c });
     if (an && an.p === r.p && an.side === a.side && an.from === a.line) blocks.push({ i, c: null, draft: true });
   }
   const out = Array(h).fill(null);
@@ -548,7 +548,7 @@ function selRange(doc, cur) {
   const lines = mine.map((r) => anchorOf(r).line);
   return { p: mine[0].p, side, from: Math.min(...lines), line: Math.max(...lines), snippet: mine[0].t.trim() + (mine.length > 1 ? ' …' : '') };
 }
-// Enter or double-click on a line: no comment there opens the composer; a comment there folds or unfolds.
+// Enter or double-click on a line: no comment there opens the composer; a comment there is hidden or shown.
 function toggleLine(doc, i) {
   if (doc[i] && doc[i].k !== 'box' && !anchorOf(doc[i])) {
     const j = doc.findIndex((x, n) => n > i && anchorOf(x));
@@ -559,13 +559,13 @@ function toggleLine(doc, i) {
   if (!r) return;
   const cs = st.vis ? [] : r.c ? [r.c] : commentsAt(r);
   if (!cs.length) return docKey(doc, i, 'c');
-  const fold = !cs.every((c) => c.folded);
-  for (const c of cs) c.folded = fold;
+  const hide = !cs.every((c) => c.hidden);
+  for (const c of cs) c.hidden = hide;
   if (r.k === 'box') { // the card under the cursor is gone; put the cursor on its line
     const c = r.c, j = curDoc().findIndex((x) => x.p === c.p && anchorOf(x)?.side === c.side && anchorOf(x)?.line === c.line);
     if (j >= 0) setCur(j);
   }
-  flash(fold ? `${cs.length} comment(s) hidden · enter or double-click to show` : 'Comment shown');
+  flash(hide ? `${cs.length} comment(s) hidden · enter or double-click to show` : 'Comment shown');
 }
 function docKey(doc, cur, k) {
   const r = doc[cur];
@@ -788,9 +788,9 @@ const KEYS = {
   '\r': 'enter', '\n': 'enter', '\t': 'tab', '\x1b': 'esc', '\x7f': 'bs', '\b': 'bs', '\x1b[5~': 'pgup', '\x1b[6~': 'pgdn',
   j: 'down', k: 'up', h: 'left', l: 'right', g: 'top', G: 'bottom', ' ': 'pgdn',
 };
-// The kitty keyboard protocol (turned on at start) reports keys as CSI <code>;<mods> u, which is how shift-enter
-// becomes distinct from enter. xterm's modifyOtherKeys form is CSI 27;<mods>;<code> ~. Fold both back to the bytes
-// the rest of the app expects. Shift-enter and alt-enter become \n, the composer's new line (ctrl-j also sends \n).
+// The app turns on the kitty keyboard protocol at start. It reports keys as CSI <code>;<mods> u, so shift-enter
+// differs from enter. xterm's modifyOtherKeys form is CSI 27;<mods>;<code> ~. normKey converts both to the bytes
+// the rest of the app expects. Shift-enter and alt-enter become \n, the composer's new line. Ctrl-j also sends \n.
 function normKey(raw) {
   let m = /^\x1b\[(\d+)(?:;(\d+))?u$/.exec(raw) || /^\x1b\[27;(\d+);(\d+)~$/.exec(raw);
   if (!m) return raw === '\x1b\r' ? '\n' : raw;
