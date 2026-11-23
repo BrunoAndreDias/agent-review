@@ -92,7 +92,7 @@ the next delivery state and whether to send:
 - The snapshot harness reads agents from `--agents-json <file>` instead of
   herdr. It also takes two key tokens: `agents=<file>` switches the file, and
   `poll` runs one poll.
-- `node --test prototypes/line-comments` runs tests that drive the harness and
+- `node --test 'prototypes/line-comments/*.test.js'` runs tests that drive the harness and
   check the header and footer through the behavior above.
 
 ## Out of scope
