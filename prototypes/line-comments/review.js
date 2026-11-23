@@ -139,7 +139,7 @@ function fileDoc(p, full) {
     out.push({ ...r, p });
     const a = st.cui === 1 && anchorOf(r);
     if (!a) continue;
-    for (const c of cs) if (c.side === a.side && c.line === a.line) out.push(...rows(c, inp?.edit === c));
+    for (const c of cs) if (c.side === a.side && c.line === a.line && (!c.folded || inp?.edit === c)) out.push(...rows(c, inp?.edit === c));
     const an = inp && !inp.edit && inp.anchor;
     if (an && an.p === p && an.side === a.side && an.line === a.line) out.push(...rows(null, true));
   }
@@ -249,7 +249,8 @@ const LANG = {
 };
 async function initHighlighter() {
   try {
-    const { createHighlighter } = await import('shiki');
+    const at = require.resolve('shiki', { paths: [__dirname, path.join(__dirname, '../layouts')] });
+    const { createHighlighter } = await import(require('url').pathToFileURL(at).href);
     hl = await createHighlighter({ themes: ['dark-plus'], langs: [...new Set(Object.values(LANG))] });
   } catch { hl = null; }
 }
@@ -310,7 +311,7 @@ function boxLines(title, body, foot, w, border, back = T.widgetBg) {
 function cardBox(c, draft, w, active) {
   if (draft) {
     const an = draftAnchor();
-    return boxLines(`✎ ${c ? 'Edit' : 'New'} comment · ${an ? lineLabel(an) : ''}`, wrap((st.input?.text ?? '') + '▏', w - 4), 'enter save · ctrl-j new line · esc cancel', w, T.accent);
+    return boxLines(`✎ ${c ? 'Edit' : 'New'} comment · ${an ? lineLabel(an) : ''}`, wrap((st.input?.text ?? '') + '▏', w - 4), 'enter save · shift-enter new line · esc cancel', w, T.accent);
   }
   return boxLines(`◆ You · ${lineLabel(c)}`, wrap(c.text, w - 4), active ? 'e edit · x delete' : '', w, active ? T.accent : T.boxIdle);
 }
@@ -361,7 +362,7 @@ function overlayPeek(out, doc, cur, top, h, w, focused) {
     idx = doc.findIndex((r) => r.p === an.p && anchorOf(r)?.side === an.side && anchorOf(r)?.line === an.line);
     lines = cardBox(st.input.edit || null, true, bw, true);
   } else {
-    const cs = focused ? commentsAt(doc[cur]) : [];
+    const cs = focused ? commentsAt(doc[cur]).filter((c) => !c.folded) : [];
     if (!cs.length) return;
     idx = cur;
     for (const c of cs) lines.push(...cardBox(c, false, bw, true));
@@ -379,7 +380,7 @@ function marginLines(doc, top, h, mw) {
   for (let i = 0; i < h; i++) {
     const r = doc[top + i], a = r && anchorOf(r);
     if (!a) continue;
-    for (const c of commentsFor(r.p)) if (c.side === a.side && c.from === a.line) blocks.push({ i, c, draft: inp?.edit === c });
+    for (const c of commentsFor(r.p)) if (c.side === a.side && c.from === a.line && (!c.folded || inp?.edit === c)) blocks.push({ i, c, draft: inp?.edit === c });
     if (an && an.p === r.p && an.side === a.side && an.from === a.line) blocks.push({ i, c: null, draft: true });
   }
   const out = Array(h).fill(null);
@@ -487,17 +488,17 @@ function header(W) {
 }
 
 const HINTS = {
-  1: 'tab Review · ↑↓ move · enter open · ← back · d diff/full · c comment · V select lines · e edit · x delete · m comment style · n next change · f changed only · s send · q quit',
-  2: 'tab Explorer · ↑↓ move · ←→ files/diffs · v mark viewed · c comment · V select lines · e edit · x delete · m style · n next change · s send · p preview · q quit',
+  1: 'tab Review · qq quit · ↑↓ move · enter open · ← back · d diff/full · enter/double-click comment or hide · c comment · V select lines · e edit · x delete · m comment style · n next change · f changed only · s send',
+  2: 'tab Explorer · qq quit · ↑↓ move · ←→ files/diffs · v mark viewed · enter/double-click comment or hide · c comment · V select lines · e edit · x delete · m style · n next change · s send · p preview',
 };
 function footer(W) {
   if (st.input) {
     const i = st.input;
     const an = draftAnchor();
-    return bg(T.inputBg) + fg(T.accent) + '▌' + paint(`✎ ${i.edit ? 'Editing' : 'Commenting on'} ${an.p} ${lineLabel(an)}   enter save · ctrl-j new line · esc cancel`, W - 1, C.input);
+    return bg(T.inputBg) + fg(T.accent) + '▌' + paint(`✎ ${i.edit ? 'Editing' : 'Commenting on'} ${an.p} ${lineLabel(an)}   enter save · shift-enter new line · esc cancel`, W - 1, C.input);
   }
   if (st.msg) return paint(` ${st.msg}`, W, C.flash);
-  if (st.vis) return paint(' Selecting lines · ↑↓ extend · c comment on the selection · esc cancel', W, C.flash);
+  if (st.vis) return paint(' Selecting lines · ↑↓ extend · enter or c to comment on the selection · esc cancel', W, C.flash);
   return paint(` ${HINTS[st.variant]}`, W, C.status);
 }
 
@@ -547,6 +548,25 @@ function selRange(doc, cur) {
   const lines = mine.map((r) => anchorOf(r).line);
   return { p: mine[0].p, side, from: Math.min(...lines), line: Math.max(...lines), snippet: mine[0].t.trim() + (mine.length > 1 ? ' …' : '') };
 }
+// Enter or double-click on a line: no comment there opens the composer; a comment there folds or unfolds.
+function toggleLine(doc, i) {
+  if (doc[i] && doc[i].k !== 'box' && !anchorOf(doc[i])) {
+    const j = doc.findIndex((x, n) => n > i && anchorOf(x));
+    if (j < 0) return;
+    setCur(i = j);
+  }
+  const r = doc[i];
+  if (!r) return;
+  const cs = st.vis ? [] : r.c ? [r.c] : commentsAt(r);
+  if (!cs.length) return docKey(doc, i, 'c');
+  const fold = !cs.every((c) => c.folded);
+  for (const c of cs) c.folded = fold;
+  if (r.k === 'box') { // the card under the cursor is gone; put the cursor on its line
+    const c = r.c, j = curDoc().findIndex((x) => x.p === c.p && anchorOf(x)?.side === c.side && anchorOf(x)?.line === c.line);
+    if (j >= 0) setCur(j);
+  }
+  flash(fold ? `${cs.length} comment(s) hidden · enter or double-click to show` : 'Comment shown');
+}
 function docKey(doc, cur, k) {
   const r = doc[cur];
   if (!r) return;
@@ -563,7 +583,14 @@ function docKey(doc, cur, k) {
 }
 
 function toggleDir(p, force) { if (force || !st.expanded.has(p)) st.expanded.add(p); else st.expanded.delete(p); }
-function selectA(r) { if (r && !r.node.dir && r.node.path !== st.a.path) { st.vis = null; Object.assign(st.a, { path: r.node.path, cur: 0, vtop: 0 }); } }
+function selectA(r) {
+  if (!r || r.node.dir || r.node.path === st.a.path) return;
+  st.vis = null;
+  st.a.path = r.node.path;
+  st.a.cur = firstCode(docA());
+  st.a.vtop = Math.max(0, st.a.cur - 5);
+}
+const firstCode = (doc) => { const i = doc.findIndex(isChange); return i >= 0 ? i : Math.max(0, doc.findIndex((r) => anchorOf(r))); };
 
 function keyA(k) {
   const a = st.a;
@@ -582,6 +609,7 @@ function keyA(k) {
   }
   if (k === 'left' || k === 'esc') { a.focus = 'tree'; return; }
   const doc = docA();
+  if (k === 'enter') return toggleLine(doc, a.cur);
   const m = move(doc, a.cur, k, st.pageH);
   if (m !== null) a.cur = m; else docKey(doc, a.cur, k);
 }
@@ -619,14 +647,22 @@ function mouse(btn, x, y, release) {
     if (!release) return;
     const { gutter, i } = st.drag, cur = st.variant === 1 ? st.a.cur : st.b.cur;
     st.drag = null;
-    if (gutter) docKey(doc, cur, 'c');
-    else if (cur === i) st.vis = null;
+    if (cur === i) st.vis = null;
+    else if (gutter) docKey(doc, cur, 'c');
     else flash(`${Math.abs(cur - i) + 1} lines selected · c to comment`);
     return;
   }
   if (release || btn === 32) return;
-  if (btn === 0 && !st.input && !st.picker && !st.preview) {
-    const pr = paneRow(x, y), doc = curDoc();
+  if (btn === 0 && !st.picker && !st.preview) {
+    const pr = paneRow(x, y), doc = curDoc(), now = Date.now(), lc = st.lastClick;
+    const dbl = !!pr && !!lc && lc.idx === pr.idx && lc.variant === st.variant && now - lc.t < 500;
+    st.lastClick = pr && !dbl ? { idx: pr.idx, t: now, variant: st.variant } : null;
+    if (dbl) {
+      if (!st.input) { st.vis = null; setCur(pr.idx); toggleLine(doc, pr.idx); }
+      else if (!st.input.text.trim()) st.input = null; // double-click again closes an empty composer
+      return;
+    }
+    if (st.input) return;
     if (pr && anchorOf(doc[pr.idx] || {})) { setCur(pr.idx); st.vis = { i: pr.idx }; st.drag = { gutter: pr.gutter, i: pr.idx }; return; }
   }
   const g = st.geo, i = y - 2;
@@ -694,6 +730,7 @@ function keyB(k) {
     return;
   }
   if (k === 'left' || k === 'esc') { b.focus = 'list'; return; }
+  if (k === 'enter') return toggleLine(doc, b.cur);
   const m = move(doc, b.cur, k, st.pageH);
   if (m !== null) b.cur = m; else docKey(doc, b.cur, k);
 }
@@ -751,7 +788,19 @@ const KEYS = {
   '\r': 'enter', '\n': 'enter', '\t': 'tab', '\x1b': 'esc', '\x7f': 'bs', '\b': 'bs', '\x1b[5~': 'pgup', '\x1b[6~': 'pgdn',
   j: 'down', k: 'up', h: 'left', l: 'right', g: 'top', G: 'bottom', ' ': 'pgdn',
 };
+// The kitty keyboard protocol (turned on at start) reports keys as CSI <code>;<mods> u, which is how shift-enter
+// becomes distinct from enter. xterm's modifyOtherKeys form is CSI 27;<mods>;<code> ~. Fold both back to the bytes
+// the rest of the app expects. Shift-enter and alt-enter become \n, the composer's new line (ctrl-j also sends \n).
+function normKey(raw) {
+  let m = /^\x1b\[(\d+)(?:;(\d+))?u$/.exec(raw) || /^\x1b\[27;(\d+);(\d+)~$/.exec(raw);
+  if (!m) return raw === '\x1b\r' ? '\n' : raw;
+  const [code, mods] = raw.endsWith('~') ? [+m[2], +m[1]] : [+m[1], +(m[2] || 1)];
+  if (code === 13) return mods === 1 ? '\r' : '\n';
+  if (mods === 5 && code >= 97 && code <= 122) return String.fromCharCode(code - 96);
+  return mods === 1 || mods === 2 ? String.fromCodePoint(code) : '';
+}
 function handle(raw) {
+  raw = normKey(raw);
   const mm = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(raw);
   if (mm) { mouse(+mm[1], +mm[2], +mm[3], mm[4] === 'm'); return; }
   st.a.free = st.b.free = false;
@@ -774,7 +823,12 @@ function handle(raw) {
     else if (k === 'enter') { st.picker = null; p.items[p.sel].run(); }
     return;
   }
-  if (k === 'q') return quit();
+  if (k === 'q') {
+    if (st.quitAt && Date.now() - st.quitAt < 1500) return quit();
+    st.quitAt = Date.now();
+    return flash('Press q again to quit');
+  }
+  st.quitAt = 0;
   if (k === 'esc' && st.vis) { st.vis = null; return; }
   if (k === 'm') { st.cui = (st.cui % 3) + 1; flash(`Comment style ${st.cui}: ${CUI[st.cui]}`); return; }
   if (k === 'tab' || (k === '1' && st.variant === 2) || (k === '2' && st.variant === 1)) { toggleMode(); return; }
@@ -827,15 +881,15 @@ load();
   walk(data.tree);
   const rows = flatTree();
   const i = rows.findIndex((r) => !r.node.dir && r.node.changed);
-  if (i >= 0) { st.a.sel = i; st.a.path = rows[i].node.path; }
+  if (i >= 0) { st.a.sel = i; selectA(rows[i]); }
 })();
 
-const TOKEN_RE = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-D]|\x1b|[\s\S]/g;
-const TOK = { ctrlj: '\n', down: '\x1b[B', up: '\x1b[A', left: '\x1b[D', right: '\x1b[C', enter: '\r', tab: '\t', esc: '\x1b', bs: '\x7f', space: ' ' };
+const TOKEN_RE = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\r|\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-D]|\x1b|[\s\S]/g;
+const TOK = { shiftenter: '\x1b[13;2u', ctrlj: '\n', down: '\x1b[B', up: '\x1b[A', left: '\x1b[D', right: '\x1b[C', enter: '\r', tab: '\t', esc: '\x1b', bs: '\x7f', space: ' ' };
 
 const tty = process.stdout;
 function quit() {
-  tty.write('\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l');
+  tty.write('\x1b[<u\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l');
   if (comments.length) console.log('Unsent review comments:\n\n' + compose());
   process.exit(0);
 }
@@ -861,7 +915,7 @@ startTty();
 
 function startTty() {
 const draw = () => tty.write('\x1b[H' + frame(tty.columns || 100, tty.rows || 30).join('\r\n'));
-tty.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1002h\x1b[?1006h');
+tty.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[>1u');
 process.stdin.setRawMode(true);
 process.stdin.setEncoding('utf8');
 process.stdin.resume();
