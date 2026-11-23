@@ -886,6 +886,8 @@ function normKey(raw) {
   const [code, mods] = raw.endsWith('~') ? [+m[2], +m[1]] : [+m[1], +(m[2] || 1)];
   if (code === 13) return mods === 1 ? '\r' : '\n';
   if (mods === 5 && code >= 97 && code <= 122) return String.fromCharCode(code - 96);
+  // Kitty reports shift-c as code 99 with the shift flag, so shift must turn a letter into its capital here.
+  if (mods === 2 && code >= 97 && code <= 122) return String.fromCharCode(code - 32);
   return mods === 1 || mods === 2 ? String.fromCodePoint(code) : '';
 }
 function handle(raw) {
