@@ -1,0 +1,15 @@
+id = "agent-review"
+name = "Agent Review"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Review coding agents' changes and send line comments to an agent"
+platforms = ["macos", "linux"]
+
+[[build]]
+command = ["npm", "install", "--prefix", "prototypes/layouts", "--no-audit", "--no-fund"]
+
+[[actions]]
+id = "open"
+title = "Review agent changes"
+contexts = ["pane"]
+command = ["sh", "prototypes/layouts/open-pane.sh"]
