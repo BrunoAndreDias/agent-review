@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Throwaway prototype: three ways to comment on a line or a range of lines. m switches between them.
 'use strict';
-const { execFileSync } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -479,17 +479,21 @@ function renderB(W, h) {
 function header(W) {
   const names = ['Explorer', 'Review'];
   const left = ' agent-review ';
-  const right = ` ${project} · base ${BASE.slice(0, 7)} · ${data.changedList.length} changed · ${comments.length} comments · style ${st.cui} ${CUI[st.cui]} (m)${st.onlyChanged ? ' · changed only' : ''} `;
+  const used = left.length + names.reduce((s, n) => s + n.length + 2, 0);
+  const counts = [`${data.changedList.length} changed`, `${comments.length} comments`];
+  const join = (ps) => ` ${[...ps, st.onlyChanged && 'changed only'].filter(Boolean).join(' · ')} `;
+  const full = join([project, `base ${BASE.slice(0, 7)}`, ...counts, targetLabel(), `style ${st.cui} (m)`]);
+  // A narrow header drops base and style first, so the send target stays visible.
+  const right = full.length < W - used ? full : join([project, ...counts, targetLabel()]);
   const tabs = names.map((n, i) => (i + 1 === st.variant
     ? bg(T.editorBg) + fg(T.accent) + '▎' + fg('#FFFFFF') + `${n} `
     : bg(T.sideBg) + fg(T.dim) + ` ${n} `) + R);
-  const used = left.length + names.reduce((s, n) => s + n.length + 2, 0);
   return C.status + left + R + tabs.join('') + paint(' '.repeat(Math.max(1, W - used - right.length)) + right, W - used, C.status);
 }
 
 const HINTS = {
-  1: 'tab Review · qq quit · ↑↓ move · enter open · ← back · d diff/full · enter/double-click comment or hide · c comment · V select lines · e edit · x delete · m comment style · n next change · f changed only · s send',
-  2: 'tab Explorer · qq quit · ↑↓ move · ←→ files/diffs · v mark viewed · enter/double-click comment or hide · c comment · V select lines · e edit · x delete · m style · n next change · s send · p preview',
+  1: 'tab Review · qq quit · ↑↓ move · enter open · ← back · d diff/full · enter/double-click comment or hide · c comment · V select lines · e edit · x delete · m comment style · n next change · f changed only · s send · t target · u cancel queued',
+  2: 'tab Explorer · qq quit · ↑↓ move · ←→ files/diffs · v mark viewed · enter/double-click comment or hide · c comment · V select lines · e edit · x delete · m style · n next change · s send · t target · u cancel queued · p preview',
 };
 function footer(W) {
   if (st.input) {
@@ -735,30 +739,115 @@ function keyB(k) {
   if (m !== null) b.cur = m; else docKey(doc, b.cur, k);
 }
 
-function agents() {
-  try { return JSON.parse(execFileSync('herdr', ['agent', 'list'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).result.agents; }
-  catch { return []; }
+// ---------- sending to a herdr agent ----------
+// The review is bound to one agent session and goes out when that agent is idle. See docs/specs/send-to-agent.md.
+let fakeAgents = opt('--agents-json'); // snapshot tests read herdr agent list output from this file
+const inHerdr = () => !!(fakeAgents || process.env.HERDR_ENV);
+let agentList = [];
+const parseAgents = (out) => JSON.parse(out).result.agents.filter((a) => a.pane_id !== process.env.HERDR_PANE_ID);
+function refreshAgents() {
+  try {
+    if (!inHerdr()) agentList = [];
+    else agentList = parseAgents(fakeAgents ? fs.readFileSync(fakeAgents, 'utf8') : execFileSync('herdr', ['agent', 'list'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
+  } catch { agentList = []; }
+  return agentList;
 }
-function sendTo(a) {
-  if (DRY) return flash(`(dry run) would send ${comments.length} comment(s) to ${a.pane_id}`);
+// The 2-second poll runs herdr in the background so it never blocks typing.
+let polling = false;
+function pollAgents(done) {
+  if (fakeAgents || !inHerdr()) { refreshAgents(); return done(); }
+  if (polling) return;
+  polling = true;
+  execFile('herdr', ['agent', 'list'], { encoding: 'utf8' }, (err, out) => {
+    polling = false;
+    try { agentList = err ? [] : parseAgents(out); } catch { agentList = []; }
+    done();
+  });
+}
+
+const sessionOf = (a) => a.agent_session?.value ?? a.pane_id;
+const mine = (a) => a.cwd === root || (a.cwd || '').startsWith(root + '/');
+const agentName = (a) => `${a.agent} · ${(a.terminal_title_stripped || a.cwd || '').slice(0, 32)}`;
+const isFree = (a) => a.agent_status === 'idle' || a.agent_status === 'done';
+const NONE = { state: 'none' };
+let target = null; // { session } or null. The session id survives herdr renumbering panes.
+let delivery = NONE; // none | queued | sent { seq, left } | done
+const isBound = (a) => !!target && sessionOf(a) === target.session;
+const bound = () => agentList.find(isBound) || null;
+
+// completion_seq comes from a counter shared by all agents, so a review counts finished turns, not values.
+// An agent that is working when the review arrives must finish that turn first, so two turns are left.
+const sentState = (a) => ({ state: 'sent', seq: a.completion_seq, left: a.agent_status === 'working' ? 2 : 1 });
+function step(d, agent) {
+  if (d.state === 'queued') return agent && isFree(agent) ? { next: sentState(agent), send: true } : { next: d, send: false };
+  if (d.state === 'sent' && agent && agent.completion_seq !== undefined && agent.completion_seq !== d.seq) {
+    return { next: d.left === 1 ? { state: 'done' } : { state: 'sent', seq: agent.completion_seq, left: 1 }, send: false };
+  }
+  return { next: d, send: false };
+}
+
+// Returns the delivery state after trying: `next` on success, still queued if the agent is blocked, none otherwise.
+function deliver(a, next) {
+  const n = comments.length;
+  if (DRY) { flash(`(dry run) would send ${n} comment(s) to ${a.agent} [${a.pane_id}]`); return next; }
   try {
     execFileSync('herdr', ['agent', 'prompt', a.pane_id, compose()], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    const n = comments.length;
-    sent.push(...comments);
-    comments = [];
-    flash(`Sent ${n} comment(s) to ${a.agent} [${a.pane_id}]`);
-  } catch (e) { flash(`Send failed: ${String(e.stderr || e.stdout || e.message).trim().slice(0, 200)}`); }
+  } catch (e) {
+    const err = String(e.stderr || e.stdout || e.message);
+    if (/agent_blocked/.test(err)) { flash(`${a.agent} is waiting on a question. The review goes out once it is idle`); return { state: 'queued' }; }
+    flash(`Send failed: ${err.trim().slice(0, 160)}`);
+    return NONE;
+  }
+  sent.push(...comments);
+  comments = [];
+  flash(`Sent ${n} comment(s) to ${agentName(a)} [${a.pane_id}]`);
+  return next;
+}
+function sendOrQueue(a) {
+  if (delivery.state === 'queued' || isFree(a)) { delivery = deliver(a, sentState(a)); return; }
+  delivery = { state: 'queued' };
+  flash(`${a.agent} is ${a.agent_status}. The review goes out when it is idle. s sends now, u cancels`);
+}
+function bind(a) {
+  if (!isBound(a) || delivery.state === 'queued') delivery = NONE;
+  target = { session: sessionOf(a) };
+}
+function bindDefault() {
+  const list = refreshAgents();
+  const a = list.find((x) => x.pane_id === opt('--target')) || list.find(mine);
+  if (a) bind(a);
+}
+function pickAgent(send) {
+  const list = refreshAgents().slice().sort((x, y) => isBound(y) - isBound(x) || mine(y) - mine(x));
+  const items = list.map((a) => ({
+    label: `${isBound(a) ? '●' : ' '} ${a.agent_status.padEnd(8)} ${agentName(a)}  [${a.pane_id}]${mine(a) ? '  · this repo' : ''}`,
+    run: () => { bind(a); if (send) sendOrQueue(a); },
+  }));
+  items.push({ label: '  Copy to clipboard', run: () => { if (!comments.length) return flash('No comments yet'); execFileSync('pbcopy', { input: compose() }); flash('Copied review to clipboard'); } });
+  items.push({ label: '  Preview message', run: () => { if (!comments.length) return flash('No comments yet'); st.preview = { lines: compose().split('\n'), top: 0 }; } });
+  st.picker = { title: send ? `Send ${comments.length} comment(s) to` : 'Review goes to', items, sel: 0 };
 }
 function openSend() {
   if (!comments.length) return flash('No comments yet. Press c on a line to add one');
-  const mine = (a) => (a.cwd || '').startsWith(root);
-  const items = agents()
-    .filter((a) => a.pane_id !== process.env.HERDR_PANE_ID)
-    .sort((x, y) => mine(y) - mine(x))
-    .map((a) => ({ label: `${a.agent_status.padEnd(8)} ${a.agent}  ${a.terminal_title_stripped || ''}  [${a.pane_id}]${mine(a) ? '  · this project' : ''}`, run: () => sendTo(a) }));
-  items.push({ label: 'Copy to clipboard', run: () => { execFileSync('pbcopy', { input: compose() }); flash('Copied review to clipboard'); } });
-  items.push({ label: 'Preview message', run: () => { st.preview = { lines: compose().split('\n'), top: 0 }; } });
-  st.picker = { title: `Send ${comments.length} comment(s) to`, items, sel: 0 };
+  refreshAgents();
+  const a = bound();
+  if (!a) return pickAgent(true);
+  sendOrQueue(a);
+}
+function pollTarget(done) {
+  pollAgents(() => {
+    const a = bound();
+    const { next, send } = step(delivery, a);
+    delivery = send ? deliver(a, next) : next;
+    done?.();
+  });
+}
+function targetLabel() {
+  if (!target) return '→ no agent (t)';
+  const a = bound();
+  if (!a) return '→ agent gone (t)';
+  const where = { queued: 'review queued (u)', sent: 'working on your review', done: 'done with your review' }[delivery.state];
+  return `→ ${a.agent} [${a.pane_id}] ${where || a.agent_status}`;
 }
 
 function reload(manual) {
@@ -833,6 +922,8 @@ function handle(raw) {
   if (k === 'm') { st.cui = (st.cui % 3) + 1; flash(`Comment style ${st.cui}: ${CUI[st.cui]}`); return; }
   if (k === 'tab' || (k === '1' && st.variant === 2) || (k === '2' && st.variant === 1)) { toggleMode(); return; }
   if (k === 's') return openSend();
+  if (k === 't') return pickAgent(false);
+  if (k === 'u' && delivery.state === 'queued') { delivery = NONE; return flash('Queued review cancelled. The comments stay'); }
   if (k === 'p') { if (comments.length) st.preview = { lines: compose().split('\n'), top: 0 }; else flash('No comments yet'); return; }
   if (k === 'r') { reload(true); return; }
   if (k === 'f') { st.onlyChanged = !st.onlyChanged; return; }
@@ -876,6 +967,7 @@ function toggleMode() {
 
 // ---------- main ----------
 load();
+bindDefault();
 (function init() {
   const walk = (n) => { for (const k of n.kids.values()) if (k.dir && k.changed) { st.expanded.add(k.path); walk(k); } };
   walk(data.tree);
@@ -900,7 +992,9 @@ if (has('--snapshot')) {
   const W = +(opt('--cols') || 120), H = +(opt('--rows') || 32);
   frame(W, H);
   for (const tok of (opt('--keys') || '').split(',').filter(Boolean)) {
-    if (tok.startsWith('text:')) for (const ch of tok.slice(5)) handle(ch);
+    if (tok.startsWith('agents=')) fakeAgents = tok.slice(7);
+    else if (tok === 'poll') pollTarget();
+    else if (tok.startsWith('text:')) for (const ch of tok.slice(5)) handle(ch);
     else if (/^(click|up|down|drag|release)@/.test(tok)) { const [w, xy] = tok.split('@'); const [x, y] = xy.split(':'); handle(`\x1b[<${{ click: 0, up: 64, down: 65, drag: 32, release: 0 }[w]};${x};${y}${w === 'release' ? 'm' : 'M'}`); }
     else handle(TOK[tok] ?? tok);
     frame(W, H);
@@ -923,6 +1017,8 @@ process.stdin.on('data', (chunk) => { for (const t of chunk.match(TOKEN_RE) || [
 tty.on('resize', () => { tty.write('\x1b[2J'); draw(); });
 setInterval(() => {
   try { if (!st.input && reload(false)) draw(); } catch {}
+  const before = targetLabel() + st.msg;
+  pollTarget(() => { if (targetLabel() + st.msg !== before) draw(); });
   if (st.msg && Date.now() - st.msgAt > 4000) { st.msg = ''; draw(); }
 }, 2000);
 draw();
