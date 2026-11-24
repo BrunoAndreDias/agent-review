@@ -34,6 +34,11 @@ The side panel:
 - `]` widens the panel by 4 columns and `[` narrows it by 4. `=` fits it to the longest name in the current view.
 - Explorer and Review share one width. It stays between 16 columns and the screen width less 30.
 
+Long lines:
+
+- `L` scrolls the code 8 columns right and `H` 8 columns left. A sideways swipe, or the wheel with shift held, scrolls 4 columns. `0` goes back to the start.
+- Only the code moves. A dim `‹` in its first column shows it is scrolled. It stops once the end of the longest line on screen is in view.
+
 The project:
 
 - The review shows one git repo. `o` opens a list of projects to switch to. So do a click on `agent-review` at the top left, a click on the project name in the header, and `tab` from Review.
@@ -60,4 +65,4 @@ Sending the review to a herdr agent:
 
 `--dry-run` shows what would be sent without sending it. It keeps the comments.
 
-Run the tests with `node --test 'prototypes/line-comments/*.test.js'`. `send.test.js` covers sending, `comments.test.js` covers ranges and file comments, `panel.test.js` covers the panel width, and `projects.test.js` covers the project picker. They drive the snapshot mode with `--agents-json <file>` in place of herdr. The key token `agents=<file>` switches that file, and `poll` runs one poll.
+Run the tests with `node --test 'prototypes/line-comments/*.test.js'`. `send.test.js` covers sending, `comments.test.js` covers ranges and file comments, `panel.test.js` covers the panel width, `projects.test.js` covers the project picker, and `scroll.test.js` covers scrolling sideways. They drive the snapshot mode with `--agents-json <file>` in place of herdr. The key token `agents=<file>` switches that file, and `poll` runs one poll.
