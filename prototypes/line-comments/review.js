@@ -14,6 +14,10 @@ try { root = execFileSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], {
 let project = path.basename(root);
 const startRoot = root;
 const DRY = has('--snapshot') || has('--dry-run');
+// --timing (snapshot mode only) prints startup phases and the time of each key to stderr as JSON, for bench.js.
+const { performance } = require('perf_hooks');
+const timing = { startup: {}, keys: [] };
+const mark = (name) => { timing.startup[name] = +performance.now().toFixed(2); };
 
 const git = (...a) => execFileSync('git', ['-C', root, ...a], { encoding: 'utf8', maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] });
 try { git('rev-parse', '--git-dir'); } catch { console.error(`Not a git repository: ${root}`); process.exit(1); }
@@ -1161,11 +1165,15 @@ function pickProject(auto) {
 }
 
 // ---------- main ----------
+mark('script');
 load();
+mark('load');
 bindDefault();
 freshView();
+mark('view');
 // Opened from a repo with no changes, such as the folder an agent was started in, it offers the projects that have some.
 if (!data.changedList.length && discover().some((p) => p.changed)) pickProject(true);
+mark('picker');
 
 const TOKEN_RE = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\r|\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-D]|\x1b|[\s\S]/g;
 const TOK = { shiftenter: '\x1b[13;2u', ctrlj: '\n', down: '\x1b[B', up: '\x1b[A', left: '\x1b[D', right: '\x1b[C', enter: '\r', tab: '\t', esc: '\x1b', bs: '\x7f', space: ' ' };
@@ -1179,17 +1187,28 @@ function quit() {
 
 (async () => {
 await initHighlighter();
+mark('highlighter');
 if (has('--snapshot')) {
   const W = +(opt('--cols') || 120), H = +(opt('--rows') || 32);
   frame(W, H);
+  mark('frame');
+  const TIMING = has('--timing');
   for (const tok of (opt('--keys') || '').split(',').filter(Boolean)) {
+    // ms is the wait until the frame is ready. busy is the part of it the main thread did work, when keys typed meanwhile wait.
+    const t = performance.now(), elu = performance.eventLoopUtilization();
+    let r;
     if (tok.startsWith('agents=')) fakeAgents = tok.slice(7);
+    else if (tok.startsWith('wait:')) await new Promise((res) => setTimeout(res, +tok.slice(5))); // idle time, for work done in the background
     else if (tok === 'poll') pollTarget();
+    else if (tok === 'tick') r = reload(false); // the file check the 2-second poll runs
     else if (tok.startsWith('text:')) for (const ch of tok.slice(5)) handle(ch);
-    else if (/^(click|up|down|drag|release)@/.test(tok)) { const [w, xy] = tok.split('@'); const [x, y] = xy.split(':'); handle(`\x1b[<${{ click: 0, up: 64, down: 65, drag: 32, release: 0 }[w]};${x};${y}${w === 'release' ? 'm' : 'M'}`); }
-    else handle(TOK[tok] ?? tok);
-    frame(W, H);
+    else if (/^(click|up|down|drag|release)@/.test(tok)) { const [w, xy] = tok.split('@'); const [x, y] = xy.split(':'); r = handle(`\x1b[<${{ click: 0, up: 64, down: 65, drag: 32, release: 0 }[w]};${x};${y}${w === 'release' ? 'm' : 'M'}`); }
+    else r = handle(TOK[tok] ?? tok);
+    if (r?.then) await r;
+    const bytes = frame(W, H).join('\r\n').length;
+    if (TIMING) timing.keys.push({ tok, ms: +(performance.now() - t).toFixed(3), busy: +performance.eventLoopUtilization(elu).active.toFixed(3), bytes });
   }
+  if (has('--timing')) process.stderr.write(JSON.stringify(timing) + '\n');
   let out = frame(W, H).join('\n');
   if (has('--plain')) out = out.replace(/\x1b\[[0-9;]*m/g, '');
   console.log(out);
