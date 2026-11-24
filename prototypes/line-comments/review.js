@@ -79,6 +79,7 @@ function load(sig) {
   cache.clear();
   if (typeof tokCache !== 'undefined') tokCache.clear();
   if (sig == null) readSignature(data);
+  if (ready) prefetchDiffs(data);
 }
 
 function readText(abs) {
@@ -126,6 +127,24 @@ function rowsFor(p, full) {
   }
   cache.set(key, out);
   return out;
+}
+
+// Review shows the diff of every changed file. Read one at a time as it opened, that took a second in a large repo,
+// so once the first frame is up they are read in the background, a few at a time.
+let ready = false;
+async function prefetchDiffs(d) {
+  const todo = d.changedList.filter((p) => !d.untracked.has(p));
+  const worker = async () => {
+    for (let p; d === data && (p = todo.shift()) !== undefined; ) {
+      const key = p + '#diff';
+      if (cache.has(key)) continue;
+      try {
+        const out = await gitAsync('diff', '-U3', '--no-color', BASE, '--', p);
+        if (d === data && !cache.has(key)) cache.set(key, parseDiff(out, false));
+      } catch {}
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
 }
 
 function stats(p) {
@@ -1234,6 +1253,8 @@ if (has('--snapshot')) {
   const W = +(opt('--cols') || 120), H = +(opt('--rows') || 32);
   frame(W, H);
   mark('frame');
+  ready = true;
+  prefetchDiffs(data);
   const TIMING = has('--timing');
   for (const tok of (opt('--keys') || '').split(',').filter(Boolean)) {
     // ms is the wait until the frame is ready. busy is the part of it the main thread did work, when keys typed meanwhile wait.
@@ -1286,4 +1307,6 @@ setInterval(() => {
   if (st.msg && Date.now() - st.msgAt > 4000) { st.msg = ''; draw(); }
 }, 2000);
 draw();
+ready = true;
+prefetchDiffs(data);
 }
