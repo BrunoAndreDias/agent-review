@@ -201,7 +201,7 @@ const st = {
   a: { focus: 'tree', sel: 0, top: 0, cur: 0, vtop: 0, full: false, path: null },
   b: { focus: 'view', sel: 0, cur: 0, top: 0 },
   input: null, picker: null, preview: null, msg: '', msgAt: 0, pageH: 20,
-  cui: +(opt('--cui') || 1), lw: null, resizing: false, hover: false, vis: null, drag: null, docW: 80, activeC: null,
+  cui: +(opt('--cui') || 1), lw: null, hx: 0, resizing: false, hover: false, vis: null, drag: null, docW: 80, activeC: null,
 };
 // The side panel's width. st.lw is null until the user sets it, and then both views share it.
 const fitPanel = (W, n) => Math.max(16, Math.min(W - 30, n));
@@ -311,7 +311,15 @@ function codeLine(r, w, sel, focused, vsel) {
   put(starts ? '◆' : sel && focused ? '+' : ' ', starts ? T.link : T.accent);
   put(String((r.k === 'del' ? r.o : r.n) ?? '').padStart(4) + ' ', sel ? T.lineNoActive : T.lineNo);
   put(r.k === 'add' ? '+ ' : r.k === 'del' ? '- ' : '  ', r.k === 'add' ? T.addGutter : T.delGutter);
-  for (const [t, c, s] of codeSegs(r)) put(t, c, s);
+  // Scrolled sideways: a dim ‹ takes the first code column, and the code starts st.hx columns in.
+  let skip = st.hx;
+  if (st.hx) { put('‹', T.dim); skip++; }
+  for (let [t, c, s] of codeSegs(r)) {
+    t = t.replace(/\t/g, '  ');
+    const n = Math.min(skip, t.length);
+    skip -= n;
+    if (t.length > n) put(t.slice(n), c, s);
+  }
   return out + ' '.repeat(Math.max(0, w - used)) + R;
 }
 
@@ -362,6 +370,9 @@ function docLines(doc, cur, top, h, w, focused) {
   const mw = marginW(w), cw = codeW(w);
   st.activeC = doc[cur]?.c || commentsAt(doc[cur])[0] || null;
   const vr = visRange(doc, cur);
+  // The longest code line on screen sets how far the code can scroll sideways. The gutter takes 9 columns.
+  const longest = Math.max(0, ...doc.slice(top, top + h).filter(anchorOf).map((r) => r.t.replace(/\t/g, '  ').length));
+  st.hx = Math.max(0, Math.min(st.hx, longest - (cw - 9) + 2));
   const out = [];
   for (let i = 0; i < h; i++) {
     const idx = top + i, r = doc[idx];
@@ -520,8 +531,8 @@ function header(W) {
 }
 
 const HINTS = {
-  1: 'tab Review · o project · qq quit · ↑↓ move · enter open · ← back · d diff/full · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · drag ↔ or [ ] resize panel · = fit names · m comment style · n next change · f changed only · s send · t target · u cancel queued',
-  2: 'tab project · qq quit · ↑↓ move · ←→ files/diffs · v mark viewed · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · drag ↔ or [ ] resize panel · = fit names · m style · n next change · s send · t target · u cancel queued · p preview',
+  1: 'tab Review · o project · qq quit · ↑↓ move · enter open · ← back · d diff/full · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · H/L or shift-scroll code sideways · 0 back · drag ↔ or [ ] resize panel · = fit names · m comment style · n next change · f changed only · s send · t target · u cancel queued',
+  2: 'tab project · qq quit · ↑↓ move · ←→ files/diffs · v mark viewed · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · H/L or shift-scroll code sideways · 0 back · drag ↔ or [ ] resize panel · = fit names · m style · n next change · s send · t target · u cancel queued · p preview',
 };
 function footer(W) {
   if (st.input) {
@@ -717,6 +728,14 @@ const setCur = (i) => { if (st.variant === 1) { st.a.cur = i; st.a.focus = 'view
 // Press on a code line starts a line selection. Dragging extends it. Releasing a gutter press opens the composer;
 // releasing a drag over the code keeps the selection for c.
 function mouse(btn, x, y, release) {
+  // 66 and 67 are a sideways wheel or trackpad swipe, 68 and 69 the wheel with shift held.
+  if (btn >= 66 && btn <= 69) {
+    if (release) return;
+    const d = btn % 2 ? 4 : -4;
+    if (st.hx === 0 && d < 0) return 'same';
+    st.hx = Math.max(0, st.hx + d);
+    return;
+  }
   if (btn === 35) { // a move with no button held. Returns 'same' when nothing needs a redraw.
     const on = !st.input && !st.picker && !st.preview && onDivider(x, y), wasResizing = st.resizing;
     st.resizing = false; // the button was released outside the window
@@ -1014,6 +1033,8 @@ function handle(raw) {
   }
   st.quitAt = 0;
   if (k === 'esc' && st.vis) { st.vis = null; return; }
+  if (k === 'H' || k === 'L') { st.hx = Math.max(0, st.hx + (k === 'L' ? 8 : -8)); return; }
+  if (k === '0') { st.hx = 0; return; }
   if (k === '[' || k === ']') return setPanelW(st.geo.lw + (k === ']' ? 4 : -4));
   if (k === '=') return setPanelW(st.variant === 1 ? treeFit() : listFit());
   if (k === 'm') { st.cui = (st.cui % 3) + 1; flash(`Comment style ${st.cui}: ${CUI[st.cui]}`); return; }
