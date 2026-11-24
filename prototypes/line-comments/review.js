@@ -11,13 +11,14 @@ const has = (n) => argv.includes(n);
 let root = path.resolve(argv[0] && !argv[0].startsWith('--') ? argv[0] : '.');
 // Started from a subfolder (herdr passes the focused pane's folder), review the whole repo.
 try { root = execFileSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch {}
-const project = path.basename(root);
+let project = path.basename(root);
+const startRoot = root;
 const DRY = has('--snapshot') || has('--dry-run');
 
 const git = (...a) => execFileSync('git', ['-C', root, ...a], { encoding: 'utf8', maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] });
 try { git('rev-parse', '--git-dir'); } catch { console.error(`Not a git repository: ${root}`); process.exit(1); }
-let BASE = opt('--base');
-if (!BASE) { try { BASE = git('rev-parse', '--verify', 'HEAD').trim(); } catch { BASE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'; } }
+const headBase = () => { try { return git('rev-parse', '--verify', 'HEAD').trim(); } catch { return '4b825dc642cb6eb9a060e54bf8d69288fbee4904'; } };
+let BASE = opt('--base') || headBase();
 
 // ---------- data ----------
 let data;
@@ -499,16 +500,19 @@ function renderB(W, h) {
   return left.map((l, i) => l + divider(i, h) + right[i]);
 }
 
-// Column positions here are also the mouse targets: Explorer is columns 15-24, Review 25-32.
+// Column positions here are also the mouse targets: agent-review is columns 1-14, Explorer 15-24, Review 25-32.
 function header(W) {
   const names = ['Explorer', 'Review'];
   const left = ' agent-review ';
   const used = left.length + names.reduce((s, n) => s + n.length + 2, 0);
   const counts = [`${data.changedList.length} changed`, `${comments.length} comments`];
   const join = (ps) => ` ${[...ps, st.onlyChanged && 'changed only'].filter(Boolean).join(' · ')} `;
-  const full = join([project, `base ${BASE.slice(0, 7)}`, ...counts, targetLabel(), `style ${st.cui} (m)`]);
+  const pick = `${project} ${st.picker?.project ? '▴' : '▾'}`;
+  const full = join([pick, `base ${BASE.slice(0, 7)}`, ...counts, targetLabel(), `style ${st.cui} (m)`]);
   // A narrow header drops base and style first, so the send target stays visible.
-  const right = full.length < W - used ? full : join([project, ...counts, targetLabel()]);
+  const right = full.length < W - used ? full : join([pick, ...counts, targetLabel()]);
+  // A click on the project name, or on the app name, opens the project picker.
+  st.projX = used + Math.max(1, W - used - right.length) + 2;
   const tabs = names.map((n, i) => (i + 1 === st.variant
     ? bg(T.editorBg) + fg(T.accent) + '▎' + fg('#FFFFFF') + `${n} `
     : bg(T.sideBg) + fg(T.dim) + ` ${n} `) + R);
@@ -516,8 +520,8 @@ function header(W) {
 }
 
 const HINTS = {
-  1: 'tab Review · qq quit · ↑↓ move · enter open · ← back · d diff/full · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · drag ↔ or [ ] resize panel · = fit names · m comment style · n next change · f changed only · s send · t target · u cancel queued',
-  2: 'tab Explorer · qq quit · ↑↓ move · ←→ files/diffs · v mark viewed · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · drag ↔ or [ ] resize panel · = fit names · m style · n next change · s send · t target · u cancel queued · p preview',
+  1: 'tab Review · o project · qq quit · ↑↓ move · enter open · ← back · d diff/full · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · drag ↔ or [ ] resize panel · = fit names · m comment style · n next change · f changed only · s send · t target · u cancel queued',
+  2: 'tab project · qq quit · ↑↓ move · ←→ files/diffs · v mark viewed · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · drag ↔ or [ ] resize panel · = fit names · m style · n next change · s send · t target · u cancel queued · p preview',
 };
 function footer(W) {
   if (st.input) {
@@ -767,6 +771,7 @@ function mouse(btn, x, y, release) {
   }
   if (st.input) return;
   if (y === 1) {
+    if (!wheel && (x <= 14 || (x >= st.projX && x < st.projX + project.length + 2))) return pickProject();
     if (!wheel && ((x >= 15 && x <= 24 && st.variant === 2) || (x >= 25 && x <= 32 && st.variant === 1))) toggleMode();
     return;
   }
@@ -998,6 +1003,7 @@ function handle(raw) {
     if (k === 'down') p.sel = Math.min(p.items.length - 1, p.sel + 1);
     else if (k === 'up') p.sel = Math.max(0, p.sel - 1);
     else if (k === 'esc' || k === 'q') st.picker = null;
+    else if (k === 'tab' && p.project) { st.picker = null; toggleMode(); }
     else if (k === 'enter') { st.picker = null; p.items[p.sel].run(); }
     return;
   }
@@ -1011,6 +1017,7 @@ function handle(raw) {
   if (k === '[' || k === ']') return setPanelW(st.geo.lw + (k === ']' ? 4 : -4));
   if (k === '=') return setPanelW(st.variant === 1 ? treeFit() : listFit());
   if (k === 'm') { st.cui = (st.cui % 3) + 1; flash(`Comment style ${st.cui}: ${CUI[st.cui]}`); return; }
+  if (k === 'o' || (k === 'tab' && st.variant === 2)) return pickProject();
   if (k === 'tab' || (k === '1' && st.variant === 2) || (k === '2' && st.variant === 1)) { toggleMode(); return; }
   if (k === 's') return openSend();
   if (k === 't') return pickAgent(false);
@@ -1056,16 +1063,88 @@ function toggleMode() {
   }
 }
 
-// ---------- main ----------
-load();
-bindDefault();
-(function init() {
+// ---------- projects ----------
+// The review shows one git repo at a time and can switch to another. See docs/specs/project-picker.md.
+// Folders to look in: --projects <folder>, and in herdr the lines of the plugin config's projects file.
+function projectFolders() {
+  const dirs = argv.flatMap((a, i) => (a === '--projects' ? [argv[i + 1]] : []));
+  if (process.env.HERDR_ENV) {
+    try {
+      const conf = execFileSync('herdr', ['plugin', 'config-dir', 'agent-review'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      dirs.push(...fs.readFileSync(path.join(conf, 'projects'), 'utf8').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')));
+    } catch {}
+  }
+  return dirs.map((d) => path.resolve(d.replace(/^~(?=\/|$)/, process.env.HOME || '~')));
+}
+const isRepo = (d) => fs.existsSync(path.join(d, '.git'));
+function projectInfo(r) {
+  let out = '';
+  try { out = execFileSync('git', ['-C', r, 'status', '--porcelain=v1', '-b', '-z', '-uall'], { encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }); } catch {}
+  const [head = '', ...entries] = out.split('\0').filter(Boolean);
+  const files = entries.filter((e) => /^[ MADRCUT?]{2} /.test(e)).map((e) => e.slice(3));
+  let newest = 0;
+  for (const f of files) { try { newest = Math.max(newest, fs.statSync(path.join(r, f)).mtimeMs); } catch {} }
+  const branch = head.replace(/^## (No commits yet on )?/, '').replace(/\.\.\..*/, '');
+  return { root: r, name: path.basename(r), branch, changed: files.length, newest, agents: agentList.filter((a) => a.cwd === r || (a.cwd || '').startsWith(r + '/')).length };
+}
+// Candidates: the start repo, the repos herdr agents run in, the repos next to those, and the repos in each folder.
+function discover() {
+  const roots = new Set([startRoot, root]);
+  for (const a of refreshAgents()) { try { if (a.cwd) roots.add(execFileSync('git', ['-C', a.cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()); } catch {} }
+  const folders = projectFolders();
+  for (const d of folders) if (isRepo(d)) roots.add(d);
+  for (const dir of new Set([...[...roots].map((r) => path.dirname(r)), ...folders])) {
+    let ents = [];
+    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch {}
+    for (const e of ents) if (e.isDirectory() && isRepo(path.join(dir, e.name))) roots.add(path.join(dir, e.name));
+  }
+  // The current project first, then the ones with changes, most recently edited first, then the clean ones by name.
+  return [...roots].map(projectInfo).sort((x, y) => (y.root === root) - (x.root === root) || (y.changed > 0) - (x.changed > 0) || y.newest - x.newest || x.name.localeCompare(y.name));
+}
+const ago = (t) => { const m = Math.round((Date.now() - t) / 60000); return !t ? '' : m < 1 ? 'now' : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`; };
+
+// Each project keeps its comments, base and view while another one is shown.
+const saved = new Map(); // root -> { comments, BASE, a, b, expanded, viewed }
+function freshView() {
+  st.a = { focus: 'tree', sel: 0, top: 0, cur: 0, vtop: 0, full: false, path: null };
+  st.b = { focus: 'view', sel: 0, cur: 0, top: 0 };
+  st.expanded = new Set();
+  st.viewed = new Set();
   const walk = (n) => { for (const k of n.kids.values()) if (k.dir && k.changed) { st.expanded.add(k.path); walk(k); } };
   walk(data.tree);
   const rows = flatTree();
   const i = rows.findIndex((r) => !r.node.dir && r.node.changed);
   if (i >= 0) { st.a.sel = i; selectA(rows[i]); }
-})();
+}
+function switchProject(r) {
+  if (r === root) return;
+  saved.set(root, { comments, BASE, a: st.a, b: st.b, expanded: st.expanded, viewed: st.viewed });
+  if (delivery.state === 'queued') delivery = NONE;
+  root = r;
+  project = path.basename(r);
+  st.vis = st.drag = null;
+  const s = saved.get(r);
+  if (s) { ({ comments, BASE } = s); load(); Object.assign(st, { a: s.a, b: s.b, expanded: s.expanded, viewed: s.viewed }); }
+  else { comments = []; BASE = headBase(); load(); freshView(); }
+  flash(`Reviewing ${project} · ${data.changedList.length} changed${comments.length ? ` · ${comments.length} comments kept` : ''}`);
+}
+// Opened on its own at start, the selection starts on the first project with changes.
+function pickProject(auto) {
+  const list = discover(), w = Math.max(...list.map((p) => p.name.length));
+  const items = list.map((p) => {
+    const kept = p.root === root ? comments.length : saved.get(p.root)?.comments.length || 0;
+    const cols = [p.branch.slice(0, 18).padEnd(18), (p.changed ? `${p.changed} changed` : 'clean').padEnd(11), (p.agents ? `${p.agents} agent${p.agents > 1 ? 's' : ''}` : '').padEnd(8), ago(p.newest).padEnd(7)];
+    return { label: `${p.root === root ? '●' : ' '} ${p.name.padEnd(w)}  ${cols.join('  ')}${kept ? `  ◆${kept}` : ''}`, run: () => switchProject(p.root) };
+  });
+  st.picker = { project: true, title: 'Review project   tab Explorer', items, sel: auto ? Math.max(0, list.findIndex((p) => p.changed)) : 0 };
+}
+
+// ---------- main ----------
+load();
+bindDefault();
+freshView();
+// Opened from a repo with no changes, such as the folder an agent was started in, it offers the projects that have some.
+if (!data.changedList.length && discover().some((p) => p.changed)) pickProject(true);
 
 const TOKEN_RE = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\r|\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-D]|\x1b|[\s\S]/g;
 const TOK = { shiftenter: '\x1b[13;2u', ctrlj: '\n', down: '\x1b[B', up: '\x1b[A', left: '\x1b[D', right: '\x1b[C', enter: '\r', tab: '\t', esc: '\x1b', bs: '\x7f', space: ' ' };

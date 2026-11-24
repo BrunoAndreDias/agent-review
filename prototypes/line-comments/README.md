@@ -6,7 +6,7 @@ Press `q` twice to quit. `ctrl-c` quits at once.
 
 ```sh
 npm install --prefix prototypes/layouts   # Shiki is loaded from that folder
-node prototypes/line-comments/review.js <repo> [--cui 1|2|3] [--target <pane_id>] [--dry-run]
+node prototypes/line-comments/review.js <repo> [--cui 1|2|3] [--target <pane_id>] [--projects <folder>] [--dry-run]
 ```
 
 Picking lines works the same in all three:
@@ -34,6 +34,13 @@ The side panel:
 - `]` widens the panel by 4 columns and `[` narrows it by 4. `=` fits it to the longest name in the current view.
 - Explorer and Review share one width. It stays between 16 columns and the screen width less 30.
 
+The project:
+
+- The review shows one git repo. `o` opens a list of projects to switch to. So do a click on `agent-review` at the top left, a click on the project name in the header, and `tab` from Review.
+- The list holds the start repo, the repos herdr agents run in, the repos next to those, and the repos in each `--projects` folder. In herdr it also reads one folder per line from `projects` in the plugin's config folder (`herdr plugin config-dir agent-review`).
+- Each project keeps its comments while another one is shown.
+- Opened from a repo with no changes, the list opens on its own if another project has changes.
+
 The three styles:
 
 1. Inline cards. Comments are boxes inserted below their last line, like VS Code's comment widget and GitHub's diff threads. The code below moves down.
@@ -53,4 +60,4 @@ Sending the review to a herdr agent:
 
 `--dry-run` shows what would be sent without sending it. It keeps the comments.
 
-Run the tests with `node --test 'prototypes/line-comments/*.test.js'`. `send.test.js` covers sending, `comments.test.js` covers ranges and file comments, and `panel.test.js` covers the panel width. They drive the snapshot mode with `--agents-json <file>` in place of herdr. The key token `agents=<file>` switches that file, and `poll` runs one poll.
+Run the tests with `node --test 'prototypes/line-comments/*.test.js'`. `send.test.js` covers sending, `comments.test.js` covers ranges and file comments, `panel.test.js` covers the panel width, and `projects.test.js` covers the project picker. They drive the snapshot mode with `--agents-json <file>` in place of herdr. The key token `agents=<file>` switches that file, and `poll` runs one poll.
