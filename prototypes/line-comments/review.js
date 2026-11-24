@@ -1140,9 +1140,9 @@ function projectFolders() {
   return dirs.map((d) => path.resolve(d.replace(/^~(?=\/|$)/, process.env.HOME || '~')));
 }
 const isRepo = (d) => fs.existsSync(path.join(d, '.git'));
-function projectInfo(r) {
-  let out = '';
-  try { out = execFileSync('git', ['-C', r, 'status', '--porcelain=v1', '-b', '-z', '-uall'], { encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }); } catch {}
+const output = (cmd, args) => new Promise((res) => execFile(cmd, args, { encoding: 'utf8', maxBuffer: 1 << 26 }, (e, out) => res(e ? '' : out)));
+async function projectInfo(r) {
+  const out = await output('git', ['-C', r, 'status', '--porcelain=v1', '-b', '-z', '-uall']);
   const [head = '', ...entries] = out.split('\0').filter(Boolean);
   const files = entries.filter((e) => /^[ MADRCUT?]{2} /.test(e)).map((e) => e.slice(3));
   let newest = 0;
@@ -1151,9 +1151,11 @@ function projectInfo(r) {
   return { root: r, name: path.basename(r), branch, changed: files.length, newest, agents: agentList.filter((a) => a.cwd === r || (a.cwd || '').startsWith(r + '/')).length };
 }
 // Candidates: the start repo, the repos herdr agents run in, the repos next to those, and the repos in each folder.
-function discover() {
+// git runs in all of them at once.
+async function discover() {
   const roots = new Set([startRoot, root]);
-  for (const a of refreshAgents()) { try { if (a.cwd) roots.add(execFileSync('git', ['-C', a.cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()); } catch {} }
+  const tops = await Promise.all(refreshAgents().filter((a) => a.cwd).map((a) => output('git', ['-C', a.cwd, 'rev-parse', '--show-toplevel'])));
+  for (const t of tops) if (t.trim()) roots.add(t.trim());
   const folders = projectFolders();
   for (const d of folders) if (isRepo(d)) roots.add(d);
   for (const dir of new Set([...[...roots].map((r) => path.dirname(r)), ...folders])) {
@@ -1162,7 +1164,8 @@ function discover() {
     for (const e of ents) if (e.isDirectory() && isRepo(path.join(dir, e.name))) roots.add(path.join(dir, e.name));
   }
   // The current project first, then the ones with changes, most recently edited first, then the clean ones by name.
-  return [...roots].map(projectInfo).sort((x, y) => (y.root === root) - (x.root === root) || (y.changed > 0) - (x.changed > 0) || y.newest - x.newest || x.name.localeCompare(y.name));
+  const list = await Promise.all([...roots].map(projectInfo));
+  return list.sort((x, y) => (y.root === root) - (x.root === root) || (y.changed > 0) - (x.changed > 0) || y.newest - x.newest || x.name.localeCompare(y.name));
 }
 const ago = (t) => { const m = Math.round((Date.now() - t) / 60000); return !t ? '' : m < 1 ? 'now' : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`; };
 
@@ -1192,8 +1195,9 @@ function switchProject(r) {
   flash(`Reviewing ${project} · ${data.changedList.length} changed${comments.length ? ` · ${comments.length} comments kept` : ''}`);
 }
 // Opened on its own at start, the selection starts on the first project with changes.
-function pickProject(auto) {
-  const list = discover(), w = Math.max(...list.map((p) => p.name.length));
+async function pickProject(auto, list) {
+  list ??= await discover();
+  const w = Math.max(...list.map((p) => p.name.length));
   const items = list.map((p) => {
     const kept = p.root === root ? comments.length : saved.get(p.root)?.comments.length || 0;
     const cols = [p.branch.slice(0, 18).padEnd(18), (p.changed ? `${p.changed} changed` : 'clean').padEnd(11), (p.agents ? `${p.agents} agent${p.agents > 1 ? 's' : ''}` : '').padEnd(8), ago(p.newest).padEnd(7)];
@@ -1210,8 +1214,6 @@ bindDefault();
 freshView();
 mark('view');
 // Opened from a repo with no changes, such as the folder an agent was started in, it offers the projects that have some.
-if (!data.changedList.length && discover().some((p) => p.changed)) pickProject(true);
-mark('picker');
 
 const TOKEN_RE = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\r|\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-D]|\x1b|[\s\S]/g;
 const TOK = { shiftenter: '\x1b[13;2u', ctrlj: '\n', down: '\x1b[B', up: '\x1b[A', left: '\x1b[D', right: '\x1b[C', enter: '\r', tab: '\t', esc: '\x1b', bs: '\x7f', space: ' ' };
@@ -1224,6 +1226,8 @@ function quit() {
 }
 
 (async () => {
+if (!data.changedList.length) { const list = await discover(); if (list.some((p) => p.changed)) await pickProject(true, list); }
+mark('picker');
 await initHighlighter();
 mark('highlighter');
 if (has('--snapshot')) {
@@ -1261,10 +1265,18 @@ tty.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?100
 process.stdin.setRawMode(true);
 process.stdin.setEncoding('utf8');
 process.stdin.resume();
+// Keys run in order. One that waits on git, like o, holds the keys typed after it until it is done.
+let keys = Promise.resolve();
 process.stdin.on('data', (chunk) => {
-  let changed = false;
-  for (const t of chunk.match(TOKEN_RE) || []) if (handle(t) !== 'same') changed = true;
-  if (changed) draw();
+  keys = keys.then(async () => {
+    let changed = false;
+    for (const t of chunk.match(TOKEN_RE) || []) {
+      let r = handle(t);
+      if (r?.then) r = await r;
+      if (r !== 'same') changed = true;
+    }
+    if (changed) draw();
+  });
 });
 tty.on('resize', () => { tty.write('\x1b[2J'); draw(); });
 setInterval(() => {
