@@ -28,30 +28,57 @@ let BASE = opt('--base') || headBase();
 let data;
 const cache = new Map();
 
-function untrackedFiles() { return git('ls-files', '--others', '--exclude-standard', '-z').split('\0').filter(Boolean); }
-
-function signature() {
-  let s = git('diff', '--no-color', BASE);
-  for (const p of untrackedFiles()) { try { s += p + fs.statSync(path.join(root, p)).mtimeMs; } catch {} }
-  return s;
-}
-
-function load(sig) {
+const gitAsync = (...a) => new Promise((res, rej) => execFile('git', ['-C', root, ...a], { encoding: 'utf8', maxBuffer: 1 << 28 }, (e, out) => (e ? rej(e) : res(out))));
+const nameStatus = () => ['diff', '--name-status', '-z', BASE];
+const untrackedArgs = ['ls-files', '--others', '--exclude-standard', '-z'];
+// The paths that differ from the base, from git diff --name-status and the untracked list, and their states.
+function changesOf(ns, un) {
   const changed = new Map();
-  const untracked = new Set();
-  const parts = git('diff', '--name-status', '-z', BASE).split('\0');
+  const parts = ns.split('\0');
   for (let i = 0; i < parts.length; ) {
     const s = parts[i++];
     if (!s) continue;
     if (s[0] === 'R' || s[0] === 'C') { i++; changed.set(parts[i++], 'R'); }
     else changed.set(parts[i++], s[0] === 'T' ? 'M' : s[0]);
   }
-  for (const p of untrackedFiles()) { changed.set(p, 'A'); untracked.add(p); }
+  const untracked = un.split('\0').filter(Boolean);
+  for (const p of untracked) changed.set(p, 'A');
+  return { changed, untracked };
+}
+// A cheap stand-in for the signature: the changed paths, and the size and times of each file among them.
+// Files whose diff changes always get a new key. The signature then decides, so a file touched but not changed keeps the view.
+function keyOf(ns, un) {
+  let s = ns + '\0\0' + un;
+  for (const p of changesOf(ns, un).changed.keys()) {
+    try { const t = fs.statSync(path.join(root, p)); s += `\0${t.size}:${t.mtimeMs}:${t.ctimeMs}`; } catch { s += '\0-'; }
+  }
+  return s;
+}
+const keyAsync = async () => { const [ns, un] = await Promise.all([gitAsync(...nameStatus()), gitAsync(...untrackedArgs)]); return keyOf(ns, un); };
+// The full diff and the time of each untracked file. A reload happens when this changes.
+async function signature() {
+  let [s, un] = await Promise.all([gitAsync('diff', '--no-color', BASE), gitAsync(...untrackedArgs)]);
+  for (const p of un.split('\0').filter(Boolean)) { try { s += p + fs.statSync(path.join(root, p)).mtimeMs; } catch {} }
+  return s;
+}
+// The full diff is slow in a repo with big binary files, so a load reads it in the background. It counts only if the
+// key still matches afterwards, so a change made meanwhile is not taken as seen.
+async function readSignature(d) {
+  try {
+    const sig = await signature();
+    if (d === data && d.sig == null && (await keyAsync()) === d.key) d.sig = sig;
+  } catch {}
+}
+
+function load(sig) {
+  const ns = git(...nameStatus()), un = git(...untrackedArgs);
+  const { changed, untracked } = changesOf(ns, un);
   const files = new Set(git('ls-files', '--cached', '-z').split('\0').filter(Boolean));
   for (const p of changed.keys()) files.add(p);
-  data = { changed, untracked, changedList: [...changed.keys()].sort(), tree: buildTree([...files].sort(), changed), sig: sig ?? signature() };
+  data = { changed, untracked: new Set(untracked), changedList: [...changed.keys()].sort(), tree: buildTree([...files].sort(), changed), key: keyOf(ns, un), sig: sig ?? null };
   cache.clear();
   if (typeof tokCache !== 'undefined') tokCache.clear();
+  if (sig == null) readSignature(data);
 }
 
 function readText(abs) {
@@ -964,12 +991,23 @@ function targetLabel() {
   return `→ ${a.agent} [${a.pane_id}] ${where || a.agent_status}`;
 }
 
-function reload(manual) {
-  const sig = signature();
-  if (!manual && sig === data.sig) return false;
-  load(sig);
-  flash(manual ? 'Reloaded' : 'Files changed on disk. Reloaded');
-  return true;
+function reload() { load(); flash('Reloaded'); }
+// The 2-second poll. Most polls stop at the cheap key. When the key changed, the full diff decides, as it always did.
+// It all runs in the background, so typing never waits for git.
+let checking = false;
+async function checkFiles() {
+  if (checking) return false;
+  checking = true;
+  try {
+    const d = data, key = await keyAsync();
+    if (d !== data || key === d.key) return false;
+    const sig = await signature();
+    if (d !== data || st.input) return false;
+    if (sig === d.sig) { d.key = key; return false; }
+    load(sig);
+    flash('Files changed on disk. Reloaded');
+    return true;
+  } catch { return false; } finally { checking = false; }
 }
 
 function handleInput(raw) {
@@ -1048,7 +1086,7 @@ function handle(raw) {
   if (k === 't') return pickAgent(false);
   if (k === 'u' && delivery.state === 'queued') { delivery = NONE; return flash('Queued review cancelled. The comments stay'); }
   if (k === 'p') { if (comments.length) st.preview = { lines: compose().split('\n'), top: 0 }; else flash('No comments yet'); return; }
-  if (k === 'r') { reload(true); return; }
+  if (k === 'r') { reload(); return; }
   if (k === 'f') { st.onlyChanged = !st.onlyChanged; return; }
   [keyA, keyB][st.variant - 1](k);
 }
@@ -1200,7 +1238,7 @@ if (has('--snapshot')) {
     if (tok.startsWith('agents=')) fakeAgents = tok.slice(7);
     else if (tok.startsWith('wait:')) await new Promise((res) => setTimeout(res, +tok.slice(5))); // idle time, for work done in the background
     else if (tok === 'poll') pollTarget();
-    else if (tok === 'tick') r = reload(false); // the file check the 2-second poll runs
+    else if (tok === 'tick') r = checkFiles(); // the file check the 2-second poll runs
     else if (tok.startsWith('text:')) for (const ch of tok.slice(5)) handle(ch);
     else if (/^(click|up|down|drag|release)@/.test(tok)) { const [w, xy] = tok.split('@'); const [x, y] = xy.split(':'); r = handle(`\x1b[<${{ click: 0, up: 64, down: 65, drag: 32, release: 0 }[w]};${x};${y}${w === 'release' ? 'm' : 'M'}`); }
     else r = handle(TOK[tok] ?? tok);
@@ -1230,7 +1268,7 @@ process.stdin.on('data', (chunk) => {
 });
 tty.on('resize', () => { tty.write('\x1b[2J'); draw(); });
 setInterval(() => {
-  try { if (!st.input && reload(false)) draw(); } catch {}
+  if (!st.input) checkFiles().then((changed) => { if (changed) draw(); });
   const before = targetLabel() + st.msg;
   pollTarget(() => { if (targetLabel() + st.msg !== before) draw(); });
   if (st.msg && Date.now() - st.msgAt > 4000) { st.msg = ''; draw(); }
