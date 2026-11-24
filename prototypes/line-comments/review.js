@@ -130,9 +130,9 @@ function rowsFor(p, full) {
 }
 
 // Review shows the diff of every changed file. Read one at a time as it opened, that took a second in a large repo,
-// so once the first frame is up they are read in the background, a few at a time.
-let ready = false;
-async function prefetchDiffs(d) {
+// so once the first frame is up they are read in the background, eight at a time.
+let ready = false, diffsPending = null;
+function prefetchDiffs(d) {
   const todo = d.changedList.filter((p) => !d.untracked.has(p));
   const worker = async () => {
     for (let p; d === data && (p = todo.shift()) !== undefined; ) {
@@ -144,7 +144,8 @@ async function prefetchDiffs(d) {
       } catch {}
     }
   };
-  await Promise.all(Array.from({ length: 6 }, worker));
+  const all = Promise.all(Array.from({ length: 8 }, worker)).then(() => { if (diffsPending === all) diffsPending = null; });
+  diffsPending = all;
 }
 
 function stats(p) {
@@ -875,7 +876,7 @@ function mouse(btn, x, y, release) {
   if (st.input) return;
   if (y === 1) {
     if (!wheel && (x <= 14 || (x >= st.projX && x < st.projX + project.length + 2))) return pickProject();
-    if (!wheel && ((x >= 15 && x <= 24 && st.variant === 2) || (x >= 25 && x <= 32 && st.variant === 1))) toggleMode();
+    if (!wheel && ((x >= 15 && x <= 24 && st.variant === 2) || (x >= 25 && x <= 32 && st.variant === 1))) return toggleMode();
     return;
   }
   const left = x <= g.lw;
@@ -1117,7 +1118,7 @@ function handle(raw) {
     if (k === 'down') p.sel = Math.min(p.items.length - 1, p.sel + 1);
     else if (k === 'up') p.sel = Math.max(0, p.sel - 1);
     else if (k === 'esc' || k === 'q') st.picker = null;
-    else if (k === 'tab' && p.project) { st.picker = null; toggleMode(); }
+    else if (k === 'tab' && p.project) { st.picker = null; return toggleMode(); }
     else if (k === 'enter') { st.picker = null; p.items[p.sel].run(); }
     return;
   }
@@ -1134,7 +1135,7 @@ function handle(raw) {
   if (k === '=') return setPanelW(st.variant === 1 ? treeFit() : listFit());
   if (k === 'm') { st.cui = (st.cui % 3) + 1; flash(`Comment style ${st.cui}: ${CUI[st.cui]}`); return; }
   if (k === 'o' || (k === 'tab' && st.variant === 2)) return pickProject();
-  if (k === 'tab' || (k === '1' && st.variant === 2) || (k === '2' && st.variant === 1)) { toggleMode(); return; }
+  if (k === 'tab' || (k === '1' && st.variant === 2) || (k === '2' && st.variant === 1)) return toggleMode();
   if (k === 's') return openSend();
   if (k === 't') return pickAgent(false);
   if (k === 'u' && delivery.state === 'queued') { delivery = NONE; return flash('Queued review cancelled. The comments stay'); }
@@ -1156,6 +1157,8 @@ function revealA(p) {
   st.a.sel = Math.max(0, flatTree().findIndex((x) => x.node.path === p));
 }
 function toggleMode() {
+  // Review shows every diff. While they are still being read in the background, it waits for them rather than read them again.
+  if (st.variant === 1 && diffsPending) return diffsPending.then(toggleMode);
   if (st.variant === 1) {
     const r = docA()[st.a.cur];
     st.variant = 2;
