@@ -1227,6 +1227,8 @@ async function pickProject(auto, list) {
 
 // ---------- main ----------
 mark('script');
+// Shiki loads while git runs: its files are read and its wasm compiled off the main thread.
+const highlighterReady = initHighlighter();
 load();
 mark('load');
 bindDefault();
@@ -1247,7 +1249,7 @@ function quit() {
 (async () => {
 if (!data.changedList.length) { const list = await discover(); if (list.some((p) => p.changed)) await pickProject(true, list); }
 mark('picker');
-await initHighlighter();
+await highlighterReady;
 mark('highlighter');
 if (has('--snapshot')) {
   const W = +(opt('--cols') || 120), H = +(opt('--rows') || 32);
