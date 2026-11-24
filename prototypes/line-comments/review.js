@@ -343,6 +343,40 @@ function codeSegs(r) {
   if (line && line.map((t) => t.content).join('') === r.t) return line.map((t) => [t.content, t.color || T.codeFg, t.fontStyle || 0]);
   return [[r.t, T.codeFg, 0]];
 }
+// While no key comes, the current file and the ones next to it are colored ahead, one side of one file at a time,
+// so moving to the next file does not wait for Shiki. Files over 64 KB are left for when they are shown.
+let aheadTimer = null;
+function colorAhead() {
+  clearTimeout(aheadTimer);
+  aheadTimer = setTimeout(function step() {
+    const job = nextAhead();
+    if (!job) return;
+    if (job.side === 'old' && !rowsFor(job.p, false).some((r) => r.k === 'del')) tokCache.set(`old:${job.p}`, null);
+    else tokensFor(job.p, job.side);
+    aheadTimer = setTimeout(step, 0);
+  }, 150);
+}
+function nextAhead() {
+  if (!hl) return null;
+  let ps;
+  if (st.variant === 1) {
+    const rows = flatTree(), i = st.a.sel;
+    ps = [st.a.path, ...[i + 1, i + 2, i - 1].map((j) => rows[j]?.node).filter((n) => n && !n.dir).map((n) => n.path)];
+  } else {
+    const list = data.changedList, i = st.b.sel;
+    ps = [list[i], list[i + 1], list[i + 2], list[i - 1]];
+  }
+  for (const p of ps) {
+    if (!p || !LANG[path.extname(p).slice(1).toLowerCase()]) continue;
+    const s = data.changed.get(p), sides = !s || s === 'A' ? ['new'] : s === 'D' ? ['old'] : ['new', 'old'];
+    for (const side of sides) {
+      if (tokCache.has(`${side}:${p}`)) continue;
+      try { if (fs.statSync(path.join(root, p)).size > 64000) continue; } catch { if (side === 'new') continue; }
+      return { p, side };
+    }
+  }
+  return null;
+}
 function codeLine(r, w, sel, focused, vsel) {
   const a = anchorOf(r), cs = commentsAt(r), da = draftAnchor();
   const drafting = da && da.p === r.p && inRange(da, a);
@@ -1262,6 +1296,7 @@ mark('highlighter');
 if (has('--snapshot')) {
   const W = +(opt('--cols') || 120), H = +(opt('--rows') || 32);
   screenUpdate(frame(W, H));
+  colorAhead();
   mark('frame');
   ready = true;
   prefetchDiffs(data);
@@ -1279,6 +1314,7 @@ if (has('--snapshot')) {
     else r = handle(TOK[tok] ?? tok);
     if (r?.then) await r;
     const bytes = screenUpdate(frame(W, H)).length;
+    colorAhead();
     if (TIMING) timing.keys.push({ tok, ms: +(performance.now() - t).toFixed(3), busy: +performance.eventLoopUtilization(elu).active.toFixed(3), bytes });
   }
   if (has('--timing')) process.stderr.write(JSON.stringify(timing) + '\n');
@@ -1291,7 +1327,7 @@ startTty();
 })();
 
 function startTty() {
-const draw = () => { const out = screenUpdate(frame(tty.columns || 100, tty.rows || 30)); if (out) tty.write(out); };
+const draw = () => { const out = screenUpdate(frame(tty.columns || 100, tty.rows || 30)); if (out) tty.write(out); colorAhead(); };
 tty.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[>1u');
 process.stdin.setRawMode(true);
 process.stdin.setEncoding('utf8');
