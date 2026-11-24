@@ -28,6 +28,12 @@ Comments on a whole file:
 - It is drawn as a card titled `whole file` above the file's first hunk, in all three styles. On the card, `e` or `enter` edits it and `x` deletes it. The `◆N` counts include it.
 - In the message it comes first under the file's heading, as "the whole file", before the line comments.
 
+The side panel:
+
+- Drag the divider between the panel and the code to set the panel's width. The divider shows a `↔` on its middle row, and turns bright while the mouse is over it or dragging it.
+- `]` widens the panel by 4 columns and `[` narrows it by 4. `=` fits it to the longest name in the current view.
+- Explorer and Review share one width. It stays between 16 columns and the screen width less 30.
+
 The three styles:
 
 1. Inline cards. Comments are boxes inserted below their last line, like VS Code's comment widget and GitHub's diff threads. The code below moves down.
@@ -47,4 +53,4 @@ Sending the review to a herdr agent:
 
 `--dry-run` shows what would be sent without sending it. It keeps the comments.
 
-Run the tests with `node --test 'prototypes/line-comments/*.test.js'`. `send.test.js` covers sending and `comments.test.js` covers ranges and file comments. They drive the snapshot mode with `--agents-json <file>` in place of herdr. The key token `agents=<file>` switches that file, and `poll` runs one poll.
+Run the tests with `node --test 'prototypes/line-comments/*.test.js'`. `send.test.js` covers sending, `comments.test.js` covers ranges and file comments, and `panel.test.js` covers the panel width. They drive the snapshot mode with `--agents-json <file>` in place of herdr. The key token `agents=<file>` switches that file, and `poll` runs one poll.

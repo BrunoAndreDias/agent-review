@@ -200,8 +200,21 @@ const st = {
   a: { focus: 'tree', sel: 0, top: 0, cur: 0, vtop: 0, full: false, path: null },
   b: { focus: 'view', sel: 0, cur: 0, top: 0 },
   input: null, picker: null, preview: null, msg: '', msgAt: 0, pageH: 20,
-  cui: +(opt('--cui') || 1), vis: null, drag: null, docW: 80, activeC: null,
+  cui: +(opt('--cui') || 1), lw: null, resizing: false, hover: false, vis: null, drag: null, docW: 80, activeC: null,
 };
+// The side panel's width. st.lw is null until the user sets it, and then both views share it.
+const fitPanel = (W, n) => Math.max(16, Math.min(W - 30, n));
+const panelW = (W, normal) => (st.lw == null ? normal : fitPanel(W, st.lw));
+const treeFit = () => Math.max(0, ...flatTree().map(({ node: n, depth }) => {
+  const cc = n.dir ? 0 : commentsFor(n.path).length, badge = n.dir ? (n.changed ? '●' : '') : data.changed.get(n.path) || '';
+  return 1 + 2 * depth + 2 + n.name.length + 1 + (cc ? `◆${cc} `.length : 0) + badge.length + 1;
+}));
+const listFit = () => Math.max(` CHANGES (${data.changedList.length})`.length, ...data.changedList.map((p) => {
+  const [a, d] = stats(p), cc = commentsFor(p).length, dir = path.dirname(p) === '.' ? '' : path.dirname(p);
+  return 3 + path.basename(p).length + (dir ? dir.length + 2 : 0) + `${cc ? `◆${cc} ` : ''}+${a} -${d} M `.length;
+}));
+function setPanelW(n) { st.lw = fitPanel(st.W, n); flash(`Panel width ${st.lw}`); }
+const onDivider = (x, y) => x === st.geo.lw + 1 && y >= 2 && y - 2 < st.geo.mh;
 const flash = (m) => { st.msg = m; st.msgAt = Date.now(); };
 
 // ---------- rendering: VS Code Dark Modern ----------
@@ -420,12 +433,17 @@ function treeLine(n, depth, w, sel, focused) {
 const docA = () => (st.a.path ? fileDoc(st.a.path, st.a.full) : []);
 const docB = () => data.changedList.flatMap((p) => [{ k: 'file', p }, ...(st.viewed.has(p) ? [] : fileDoc(p, false)), { k: 'gap', p }]);
 const sep = C.border + '│' + R;
+// The divider between the panel and the code. A ↔ on its middle row shows it can be dragged.
+function divider(i, h) {
+  if (st.resizing || st.hover) return fg(T.accent) + '┃' + R;
+  return i === Math.floor(h / 2) ? fg(T.lineNoActive) + '↔' + R : sep;
+}
 
 function renderA(W, h) {
   const a = st.a;
   const drawer = comments.length ? Math.min(comments.length, 5) + 1 : 0;
   const mh = h - drawer;
-  const lw = Math.max(24, Math.min(44, Math.floor(W * 0.3))), rw = W - lw - 1;
+  const lw = panelW(W, Math.max(24, Math.min(44, Math.floor(W * 0.3)))), rw = W - lw - 1;
   st.docW = codeW(rw);
   const rows = flatTree();
   a.sel = clamp(a.sel, rows.length);
@@ -443,7 +461,7 @@ function renderA(W, h) {
   const mode = a.path && data.changed.has(a.path) ? (a.full ? 'full file' : 'diff') : 'unchanged';
   const crumbs = a.path ? ` ${a.path.split('/').join(' › ')}   ${mode}` : ' Select a file';
   const right = [paint(crumbs, rw, C.title), ...docLines(doc, a.cur, a.vtop, mh - 1, rw, a.focus === 'view')];
-  const out = left.map((l, i) => l + sep + right[i]);
+  const out = left.map((l, i) => l + divider(i, mh) + right[i]);
   if (drawer) {
     out.push(paint(` COMMENTS (${comments.length})   s send · p preview`, W, C.section));
     for (const c of comments.slice(-5)) out.push(listRow([['   ◆ ', T.link], [`${c.p}:${lineLabel(c)}  `, T.dim], [c.text.replace(/\n/g, ' ⏎ '), T.fg]], W, false, false));
@@ -453,7 +471,7 @@ function renderA(W, h) {
 
 function renderB(W, h) {
   const b = st.b, list = data.changedList;
-  const lw = Math.max(24, Math.min(48, Math.floor(W * 0.32))), rw = W - lw - 1;
+  const lw = panelW(W, Math.max(24, Math.min(48, Math.floor(W * 0.32)))), rw = W - lw - 1;
   st.docW = codeW(rw);
   const doc = docB();
   b.cur = clamp(b.cur, doc.length);
@@ -478,7 +496,7 @@ function renderB(W, h) {
     left.push(listRow([[v ? ' ✓ ' : '   ', T.A], [shown, v ? T.dim : T[s]], [dirPart + pad, T.dim], [cc ? `◆${cc} ` : '', T.link], [`+${a} `, T.A], [`-${d} `, T.D], [`${s} `, T[s]]], lw, idx === b.sel, b.focus === 'list'));
   }
   const right = docLines(doc, b.cur, b.top, h, rw, b.focus === 'view');
-  return left.map((l, i) => l + sep + right[i]);
+  return left.map((l, i) => l + divider(i, h) + right[i]);
 }
 
 // Column positions here are also the mouse targets: Explorer is columns 15-24, Review 25-32.
@@ -498,8 +516,8 @@ function header(W) {
 }
 
 const HINTS = {
-  1: 'tab Review · qq quit · ↑↓ move · enter open · ← back · d diff/full · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · m comment style · n next change · f changed only · s send · t target · u cancel queued',
-  2: 'tab Explorer · qq quit · ↑↓ move · ←→ files/diffs · v mark viewed · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · m style · n next change · s send · t target · u cancel queued · p preview',
+  1: 'tab Review · qq quit · ↑↓ move · enter open · ← back · d diff/full · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · drag ↔ or [ ] resize panel · = fit names · m comment style · n next change · f changed only · s send · t target · u cancel queued',
+  2: 'tab Explorer · qq quit · ↑↓ move · ←→ files/diffs · v mark viewed · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · drag ↔ or [ ] resize panel · = fit names · m style · n next change · s send · t target · u cancel queued · p preview',
 };
 function footer(W) {
   if (st.input) {
@@ -521,6 +539,7 @@ function frame(W, H) {
     while (body.length < H - 2) body.push(paint('', W, C.editor));
     return [paint(' Message the agent will receive', W, C.section), ...body, paint(' j/k scroll · s send · esc close', W, C.status)];
   }
+  st.W = W;
   const lines = [header(W), ...[renderA, renderB][st.variant - 1](W, H - 2), footer(W)];
   if (st.picker) {
     const p = st.picker;
@@ -694,6 +713,16 @@ const setCur = (i) => { if (st.variant === 1) { st.a.cur = i; st.a.focus = 'view
 // Press on a code line starts a line selection. Dragging extends it. Releasing a gutter press opens the composer;
 // releasing a drag over the code keeps the selection for c.
 function mouse(btn, x, y, release) {
+  if (btn === 35) { // a move with no button held. Returns 'same' when nothing needs a redraw.
+    const on = !st.input && !st.picker && !st.preview && onDivider(x, y), wasResizing = st.resizing;
+    st.resizing = false; // the button was released outside the window
+    if (on === st.hover && !wasResizing) return 'same';
+    st.hover = on;
+    if (tty.isTTY) tty.write(`\x1b]22;${on ? 'ew-resize' : 'default'}\x1b\\`);
+    return;
+  }
+  if (st.resizing) { setPanelW(x - 1); if (release) st.resizing = false; return; }
+  if (btn === 0 && !release && !st.input && !st.picker && !st.preview && onDivider(x, y)) { st.resizing = true; return; }
   if (st.drag) {
     const pr = paneRow(x, y), doc = curDoc();
     if (pr && doc[pr.idx]) setCur(pr.idx);
@@ -951,7 +980,7 @@ function normKey(raw) {
 function handle(raw) {
   raw = normKey(raw);
   const mm = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(raw);
-  if (mm) { mouse(+mm[1], +mm[2], +mm[3], mm[4] === 'm'); return; }
+  if (mm) return mouse(+mm[1], +mm[2], +mm[3], mm[4] === 'm');
   st.a.free = st.b.free = false;
   if (raw === '\x03') return quit();
   if (st.input) return handleInput(raw);
@@ -979,6 +1008,8 @@ function handle(raw) {
   }
   st.quitAt = 0;
   if (k === 'esc' && st.vis) { st.vis = null; return; }
+  if (k === '[' || k === ']') return setPanelW(st.geo.lw + (k === ']' ? 4 : -4));
+  if (k === '=') return setPanelW(st.variant === 1 ? treeFit() : listFit());
   if (k === 'm') { st.cui = (st.cui % 3) + 1; flash(`Comment style ${st.cui}: ${CUI[st.cui]}`); return; }
   if (k === 'tab' || (k === '1' && st.variant === 2) || (k === '2' && st.variant === 1)) { toggleMode(); return; }
   if (k === 's') return openSend();
@@ -1041,7 +1072,7 @@ const TOK = { shiftenter: '\x1b[13;2u', ctrlj: '\n', down: '\x1b[B', up: '\x1b[A
 
 const tty = process.stdout;
 function quit() {
-  tty.write('\x1b[<u\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l');
+  tty.write('\x1b]22;default\x1b\\\x1b[<u\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l');
   if (comments.length) console.log('Unsent review comments:\n\n' + compose());
   process.exit(0);
 }
@@ -1069,11 +1100,15 @@ startTty();
 
 function startTty() {
 const draw = () => tty.write('\x1b[H' + frame(tty.columns || 100, tty.rows || 30).join('\r\n'));
-tty.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[>1u');
+tty.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[>1u');
 process.stdin.setRawMode(true);
 process.stdin.setEncoding('utf8');
 process.stdin.resume();
-process.stdin.on('data', (chunk) => { for (const t of chunk.match(TOKEN_RE) || []) handle(t); draw(); });
+process.stdin.on('data', (chunk) => {
+  let changed = false;
+  for (const t of chunk.match(TOKEN_RE) || []) if (handle(t) !== 'same') changed = true;
+  if (changed) draw();
+});
 tty.on('resize', () => { tty.write('\x1b[2J'); draw(); });
 setInterval(() => {
   try { if (!st.input && reload(false)) draw(); } catch {}
