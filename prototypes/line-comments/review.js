@@ -1240,6 +1240,14 @@ const TOKEN_RE = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\r|\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-D
 const TOK = { shiftenter: '\x1b[13;2u', ctrlj: '\n', down: '\x1b[B', up: '\x1b[A', left: '\x1b[D', right: '\x1b[C', enter: '\r', tab: '\t', esc: '\x1b', bs: '\x7f', space: ' ' };
 
 const tty = process.stdout;
+// The rows on screen now. A draw writes only the rows that differ, so moving the cursor sends two rows, not the screen.
+let shown = [];
+function screenUpdate(lines) {
+  let out = '';
+  lines.forEach((l, i) => { if (l !== shown[i]) out += `\x1b[${i + 1};1H${l}`; });
+  shown = lines;
+  return out;
+}
 function quit() {
   tty.write('\x1b]22;default\x1b\\\x1b[<u\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l');
   if (comments.length) console.log('Unsent review comments:\n\n' + compose());
@@ -1253,7 +1261,7 @@ await highlighterReady;
 mark('highlighter');
 if (has('--snapshot')) {
   const W = +(opt('--cols') || 120), H = +(opt('--rows') || 32);
-  frame(W, H);
+  screenUpdate(frame(W, H));
   mark('frame');
   ready = true;
   prefetchDiffs(data);
@@ -1270,7 +1278,7 @@ if (has('--snapshot')) {
     else if (/^(click|up|down|drag|release)@/.test(tok)) { const [w, xy] = tok.split('@'); const [x, y] = xy.split(':'); r = handle(`\x1b[<${{ click: 0, up: 64, down: 65, drag: 32, release: 0 }[w]};${x};${y}${w === 'release' ? 'm' : 'M'}`); }
     else r = handle(TOK[tok] ?? tok);
     if (r?.then) await r;
-    const bytes = frame(W, H).join('\r\n').length;
+    const bytes = screenUpdate(frame(W, H)).length;
     if (TIMING) timing.keys.push({ tok, ms: +(performance.now() - t).toFixed(3), busy: +performance.eventLoopUtilization(elu).active.toFixed(3), bytes });
   }
   if (has('--timing')) process.stderr.write(JSON.stringify(timing) + '\n');
@@ -1283,7 +1291,7 @@ startTty();
 })();
 
 function startTty() {
-const draw = () => tty.write('\x1b[H' + frame(tty.columns || 100, tty.rows || 30).join('\r\n'));
+const draw = () => { const out = screenUpdate(frame(tty.columns || 100, tty.rows || 30)); if (out) tty.write(out); };
 tty.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[>1u');
 process.stdin.setRawMode(true);
 process.stdin.setEncoding('utf8');
@@ -1301,7 +1309,7 @@ process.stdin.on('data', (chunk) => {
     if (changed) draw();
   });
 });
-tty.on('resize', () => { tty.write('\x1b[2J'); draw(); });
+tty.on('resize', () => { tty.write('\x1b[2J'); shown = []; draw(); });
 setInterval(() => {
   if (!st.input) checkFiles().then((changed) => { if (changed) draw(); });
   const before = targetLabel() + st.msg;
