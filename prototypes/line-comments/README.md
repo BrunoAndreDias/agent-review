@@ -66,3 +66,5 @@ Sending the review to a herdr agent:
 `--dry-run` shows what would be sent without sending it. It keeps the comments.
 
 Run the tests with `node --test 'prototypes/line-comments/*.test.js'`. `send.test.js` covers sending, `comments.test.js` covers ranges and file comments, `panel.test.js` covers the panel width, `projects.test.js` covers the project picker, and `scroll.test.js` covers scrolling sideways. They drive the snapshot mode with `--agents-json <file>` in place of herdr. The key token `agents=<file>` switches that file, and `poll` runs one poll.
+
+`node prototypes/line-comments/bench.js [repo ...]` times startup, keys, the 2-second file check and the project picker, through the snapshot mode's `--timing` output. With no repo it builds a large synthetic one. `--fixture <folder>` keeps that repo for the next run.

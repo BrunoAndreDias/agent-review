@@ -14,6 +14,10 @@ try { root = execFileSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], {
 let project = path.basename(root);
 const startRoot = root;
 const DRY = has('--snapshot') || has('--dry-run');
+// --timing (snapshot mode only) prints startup phases and the time of each key to stderr as JSON, for bench.js.
+const { performance } = require('perf_hooks');
+const timing = { startup: {}, keys: [] };
+const mark = (name) => { timing.startup[name] = +performance.now().toFixed(2); };
 
 const git = (...a) => execFileSync('git', ['-C', root, ...a], { encoding: 'utf8', maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] });
 try { git('rev-parse', '--git-dir'); } catch { console.error(`Not a git repository: ${root}`); process.exit(1); }
@@ -24,30 +28,58 @@ let BASE = opt('--base') || headBase();
 let data;
 const cache = new Map();
 
-function untrackedFiles() { return git('ls-files', '--others', '--exclude-standard', '-z').split('\0').filter(Boolean); }
-
-function signature() {
-  let s = git('diff', '--no-color', BASE);
-  for (const p of untrackedFiles()) { try { s += p + fs.statSync(path.join(root, p)).mtimeMs; } catch {} }
-  return s;
-}
-
-function load(sig) {
+const gitAsync = (...a) => new Promise((res, rej) => execFile('git', ['-C', root, ...a], { encoding: 'utf8', maxBuffer: 1 << 28 }, (e, out) => (e ? rej(e) : res(out))));
+const nameStatus = () => ['diff', '--name-status', '-z', BASE];
+const untrackedArgs = ['ls-files', '--others', '--exclude-standard', '-z'];
+// The paths that differ from the base, from git diff --name-status and the untracked list, and their states.
+function changesOf(ns, un) {
   const changed = new Map();
-  const untracked = new Set();
-  const parts = git('diff', '--name-status', '-z', BASE).split('\0');
+  const parts = ns.split('\0');
   for (let i = 0; i < parts.length; ) {
     const s = parts[i++];
     if (!s) continue;
     if (s[0] === 'R' || s[0] === 'C') { i++; changed.set(parts[i++], 'R'); }
     else changed.set(parts[i++], s[0] === 'T' ? 'M' : s[0]);
   }
-  for (const p of untrackedFiles()) { changed.set(p, 'A'); untracked.add(p); }
+  const untracked = un.split('\0').filter(Boolean);
+  for (const p of untracked) changed.set(p, 'A');
+  return { changed, untracked };
+}
+// A cheap stand-in for the signature: the changed paths, and the size and times of each file among them.
+// Files whose diff changes always get a new key. The signature then decides, so a file touched but not changed keeps the view.
+function keyOf(ns, un) {
+  let s = ns + '\0\0' + un;
+  for (const p of changesOf(ns, un).changed.keys()) {
+    try { const t = fs.statSync(path.join(root, p)); s += `\0${t.size}:${t.mtimeMs}:${t.ctimeMs}`; } catch { s += '\0-'; }
+  }
+  return s;
+}
+const keyAsync = async () => { const [ns, un] = await Promise.all([gitAsync(...nameStatus()), gitAsync(...untrackedArgs)]); return keyOf(ns, un); };
+// The full diff and the time of each untracked file. A reload happens when this changes.
+async function signature() {
+  let [s, un] = await Promise.all([gitAsync('diff', '--no-color', BASE), gitAsync(...untrackedArgs)]);
+  for (const p of un.split('\0').filter(Boolean)) { try { s += p + fs.statSync(path.join(root, p)).mtimeMs; } catch {} }
+  return s;
+}
+// The full diff is slow in a repo with big binary files, so a load reads it in the background. It counts only if the
+// key still matches afterwards, so a change made meanwhile is not taken as seen.
+async function readSignature(d) {
+  try {
+    const sig = await signature();
+    if (d === data && d.sig == null && (await keyAsync()) === d.key) d.sig = sig;
+  } catch {}
+}
+
+function load(sig) {
+  const ns = git(...nameStatus()), un = git(...untrackedArgs);
+  const { changed, untracked } = changesOf(ns, un);
   const files = new Set(git('ls-files', '--cached', '-z').split('\0').filter(Boolean));
   for (const p of changed.keys()) files.add(p);
-  data = { changed, untracked, changedList: [...changed.keys()].sort(), tree: buildTree([...files].sort(), changed), sig: sig ?? signature() };
+  data = { changed, untracked: new Set(untracked), changedList: [...changed.keys()].sort(), tree: buildTree([...files].sort(), changed), key: keyOf(ns, un), sig: sig ?? null };
   cache.clear();
   if (typeof tokCache !== 'undefined') tokCache.clear();
+  if (sig == null) readSignature(data);
+  if (ready) prefetchDiffs(data);
 }
 
 function readText(abs) {
@@ -95,6 +127,25 @@ function rowsFor(p, full) {
   }
   cache.set(key, out);
   return out;
+}
+
+// Review shows the diff of every changed file. Read one at a time as it opened, that took a second in a large repo,
+// so once the first frame is up they are read in the background, eight at a time.
+let ready = false, diffsPending = null;
+function prefetchDiffs(d) {
+  const todo = d.changedList.filter((p) => !d.untracked.has(p));
+  const worker = async () => {
+    for (let p; d === data && (p = todo.shift()) !== undefined; ) {
+      const key = p + '#diff';
+      if (cache.has(key)) continue;
+      try {
+        const out = await gitAsync('diff', '-U3', '--no-color', BASE, '--', p);
+        if (d === data && !cache.has(key)) cache.set(key, parseDiff(out, false));
+      } catch {}
+    }
+  };
+  const all = Promise.all(Array.from({ length: 8 }, worker)).then(() => { if (diffsPending === all) diffsPending = null; });
+  diffsPending = all;
 }
 
 function stats(p) {
@@ -292,6 +343,40 @@ function codeSegs(r) {
   const line = tokensFor(r.p, old ? 'old' : 'new')?.[(old ? r.o : r.n) - 1];
   if (line && line.map((t) => t.content).join('') === r.t) return line.map((t) => [t.content, t.color || T.codeFg, t.fontStyle || 0]);
   return [[r.t, T.codeFg, 0]];
+}
+// While no key comes, the current file and the ones next to it are colored ahead, one side of one file at a time,
+// so moving to the next file does not wait for Shiki. Files over 64 KB are left for when they are shown.
+let aheadTimer = null;
+function colorAhead() {
+  clearTimeout(aheadTimer);
+  aheadTimer = setTimeout(function step() {
+    const job = nextAhead();
+    if (!job) return;
+    if (job.side === 'old' && !rowsFor(job.p, false).some((r) => r.k === 'del')) tokCache.set(`old:${job.p}`, null);
+    else tokensFor(job.p, job.side);
+    aheadTimer = setTimeout(step, 0);
+  }, 150);
+}
+function nextAhead() {
+  if (!hl) return null;
+  let ps;
+  if (st.variant === 1) {
+    const rows = flatTree(), i = st.a.sel;
+    ps = [st.a.path, ...[i + 1, i + 2, i - 1].map((j) => rows[j]?.node).filter((n) => n && !n.dir).map((n) => n.path)];
+  } else {
+    const list = data.changedList, i = st.b.sel;
+    ps = [list[i], list[i + 1], list[i + 2], list[i - 1]];
+  }
+  for (const p of ps) {
+    if (!p || !LANG[path.extname(p).slice(1).toLowerCase()]) continue;
+    const s = data.changed.get(p), sides = !s || s === 'A' ? ['new'] : s === 'D' ? ['old'] : ['new', 'old'];
+    for (const side of sides) {
+      if (tokCache.has(`${side}:${p}`)) continue;
+      try { if (fs.statSync(path.join(root, p)).size > 64000) continue; } catch { if (side === 'new') continue; }
+      return { p, side };
+    }
+  }
+  return null;
 }
 function codeLine(r, w, sel, focused, vsel) {
   const a = anchorOf(r), cs = commentsAt(r), da = draftAnchor();
@@ -791,7 +876,7 @@ function mouse(btn, x, y, release) {
   if (st.input) return;
   if (y === 1) {
     if (!wheel && (x <= 14 || (x >= st.projX && x < st.projX + project.length + 2))) return pickProject();
-    if (!wheel && ((x >= 15 && x <= 24 && st.variant === 2) || (x >= 25 && x <= 32 && st.variant === 1))) toggleMode();
+    if (!wheel && ((x >= 15 && x <= 24 && st.variant === 2) || (x >= 25 && x <= 32 && st.variant === 1))) return toggleMode();
     return;
   }
   const left = x <= g.lw;
@@ -960,12 +1045,23 @@ function targetLabel() {
   return `→ ${a.agent} [${a.pane_id}] ${where || a.agent_status}`;
 }
 
-function reload(manual) {
-  const sig = signature();
-  if (!manual && sig === data.sig) return false;
-  load(sig);
-  flash(manual ? 'Reloaded' : 'Files changed on disk. Reloaded');
-  return true;
+function reload() { load(); flash('Reloaded'); }
+// The 2-second poll. Most polls stop at the cheap key. When the key changed, the full diff decides, as it always did.
+// It all runs in the background, so typing never waits for git.
+let checking = false;
+async function checkFiles() {
+  if (checking) return false;
+  checking = true;
+  try {
+    const d = data, key = await keyAsync();
+    if (d !== data || key === d.key) return false;
+    const sig = await signature();
+    if (d !== data || st.input) return false;
+    if (sig === d.sig) { d.key = key; return false; }
+    load(sig);
+    flash('Files changed on disk. Reloaded');
+    return true;
+  } catch { return false; } finally { checking = false; }
 }
 
 function handleInput(raw) {
@@ -1022,7 +1118,7 @@ function handle(raw) {
     if (k === 'down') p.sel = Math.min(p.items.length - 1, p.sel + 1);
     else if (k === 'up') p.sel = Math.max(0, p.sel - 1);
     else if (k === 'esc' || k === 'q') st.picker = null;
-    else if (k === 'tab' && p.project) { st.picker = null; toggleMode(); }
+    else if (k === 'tab' && p.project) { st.picker = null; return toggleMode(); }
     else if (k === 'enter') { st.picker = null; p.items[p.sel].run(); }
     return;
   }
@@ -1039,12 +1135,12 @@ function handle(raw) {
   if (k === '=') return setPanelW(st.variant === 1 ? treeFit() : listFit());
   if (k === 'm') { st.cui = (st.cui % 3) + 1; flash(`Comment style ${st.cui}: ${CUI[st.cui]}`); return; }
   if (k === 'o' || (k === 'tab' && st.variant === 2)) return pickProject();
-  if (k === 'tab' || (k === '1' && st.variant === 2) || (k === '2' && st.variant === 1)) { toggleMode(); return; }
+  if (k === 'tab' || (k === '1' && st.variant === 2) || (k === '2' && st.variant === 1)) return toggleMode();
   if (k === 's') return openSend();
   if (k === 't') return pickAgent(false);
   if (k === 'u' && delivery.state === 'queued') { delivery = NONE; return flash('Queued review cancelled. The comments stay'); }
   if (k === 'p') { if (comments.length) st.preview = { lines: compose().split('\n'), top: 0 }; else flash('No comments yet'); return; }
-  if (k === 'r') { reload(true); return; }
+  if (k === 'r') { reload(); return; }
   if (k === 'f') { st.onlyChanged = !st.onlyChanged; return; }
   [keyA, keyB][st.variant - 1](k);
 }
@@ -1061,6 +1157,8 @@ function revealA(p) {
   st.a.sel = Math.max(0, flatTree().findIndex((x) => x.node.path === p));
 }
 function toggleMode() {
+  // Review shows every diff. While they are still being read in the background, it waits for them rather than read them again.
+  if (st.variant === 1 && diffsPending) return diffsPending.then(toggleMode);
   if (st.variant === 1) {
     const r = docA()[st.a.cur];
     st.variant = 2;
@@ -1098,9 +1196,9 @@ function projectFolders() {
   return dirs.map((d) => path.resolve(d.replace(/^~(?=\/|$)/, process.env.HOME || '~')));
 }
 const isRepo = (d) => fs.existsSync(path.join(d, '.git'));
-function projectInfo(r) {
-  let out = '';
-  try { out = execFileSync('git', ['-C', r, 'status', '--porcelain=v1', '-b', '-z', '-uall'], { encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }); } catch {}
+const output = (cmd, args) => new Promise((res) => execFile(cmd, args, { encoding: 'utf8', maxBuffer: 1 << 26 }, (e, out) => res(e ? '' : out)));
+async function projectInfo(r) {
+  const out = await output('git', ['-C', r, 'status', '--porcelain=v1', '-b', '-z', '-uall']);
   const [head = '', ...entries] = out.split('\0').filter(Boolean);
   const files = entries.filter((e) => /^[ MADRCUT?]{2} /.test(e)).map((e) => e.slice(3));
   let newest = 0;
@@ -1109,9 +1207,11 @@ function projectInfo(r) {
   return { root: r, name: path.basename(r), branch, changed: files.length, newest, agents: agentList.filter((a) => a.cwd === r || (a.cwd || '').startsWith(r + '/')).length };
 }
 // Candidates: the start repo, the repos herdr agents run in, the repos next to those, and the repos in each folder.
-function discover() {
+// git runs in all of them at once.
+async function discover() {
   const roots = new Set([startRoot, root]);
-  for (const a of refreshAgents()) { try { if (a.cwd) roots.add(execFileSync('git', ['-C', a.cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()); } catch {} }
+  const tops = await Promise.all(refreshAgents().filter((a) => a.cwd).map((a) => output('git', ['-C', a.cwd, 'rev-parse', '--show-toplevel'])));
+  for (const t of tops) if (t.trim()) roots.add(t.trim());
   const folders = projectFolders();
   for (const d of folders) if (isRepo(d)) roots.add(d);
   for (const dir of new Set([...[...roots].map((r) => path.dirname(r)), ...folders])) {
@@ -1120,7 +1220,8 @@ function discover() {
     for (const e of ents) if (e.isDirectory() && isRepo(path.join(dir, e.name))) roots.add(path.join(dir, e.name));
   }
   // The current project first, then the ones with changes, most recently edited first, then the clean ones by name.
-  return [...roots].map(projectInfo).sort((x, y) => (y.root === root) - (x.root === root) || (y.changed > 0) - (x.changed > 0) || y.newest - x.newest || x.name.localeCompare(y.name));
+  const list = await Promise.all([...roots].map(projectInfo));
+  return list.sort((x, y) => (y.root === root) - (x.root === root) || (y.changed > 0) - (x.changed > 0) || y.newest - x.newest || x.name.localeCompare(y.name));
 }
 const ago = (t) => { const m = Math.round((Date.now() - t) / 60000); return !t ? '' : m < 1 ? 'now' : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`; };
 
@@ -1150,8 +1251,9 @@ function switchProject(r) {
   flash(`Reviewing ${project} · ${data.changedList.length} changed${comments.length ? ` · ${comments.length} comments kept` : ''}`);
 }
 // Opened on its own at start, the selection starts on the first project with changes.
-function pickProject(auto) {
-  const list = discover(), w = Math.max(...list.map((p) => p.name.length));
+async function pickProject(auto, list) {
+  list ??= await discover();
+  const w = Math.max(...list.map((p) => p.name.length));
   const items = list.map((p) => {
     const kept = p.root === root ? comments.length : saved.get(p.root)?.comments.length || 0;
     const cols = [p.branch.slice(0, 18).padEnd(18), (p.changed ? `${p.changed} changed` : 'clean').padEnd(11), (p.agents ? `${p.agents} agent${p.agents > 1 ? 's' : ''}` : '').padEnd(8), ago(p.newest).padEnd(7)];
@@ -1161,16 +1263,27 @@ function pickProject(auto) {
 }
 
 // ---------- main ----------
+mark('script');
+// Shiki loads while git runs: its files are read and its wasm compiled off the main thread.
+const highlighterReady = initHighlighter();
 load();
+mark('load');
 bindDefault();
 freshView();
-// Opened from a repo with no changes, such as the folder an agent was started in, it offers the projects that have some.
-if (!data.changedList.length && discover().some((p) => p.changed)) pickProject(true);
+mark('view');
 
 const TOKEN_RE = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\r|\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-D]|\x1b|[\s\S]/g;
 const TOK = { shiftenter: '\x1b[13;2u', ctrlj: '\n', down: '\x1b[B', up: '\x1b[A', left: '\x1b[D', right: '\x1b[C', enter: '\r', tab: '\t', esc: '\x1b', bs: '\x7f', space: ' ' };
 
 const tty = process.stdout;
+// The rows on screen now. A draw writes only the rows that differ, so moving the cursor sends two rows, not the screen.
+let shown = [];
+function screenUpdate(lines) {
+  let out = '';
+  lines.forEach((l, i) => { if (l !== shown[i]) out += `\x1b[${i + 1};1H${l}`; });
+  shown = lines;
+  return out;
+}
 function quit() {
   tty.write('\x1b]22;default\x1b\\\x1b[<u\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l');
   if (comments.length) console.log('Unsent review comments:\n\n' + compose());
@@ -1178,18 +1291,36 @@ function quit() {
 }
 
 (async () => {
-await initHighlighter();
+// Opened from a repo with no changes, such as the folder an agent was started in, it offers the projects that have some.
+if (!data.changedList.length) { const list = await discover(); if (list.some((p) => p.changed)) await pickProject(true, list); }
+mark('picker');
+await highlighterReady;
+mark('highlighter');
 if (has('--snapshot')) {
   const W = +(opt('--cols') || 120), H = +(opt('--rows') || 32);
-  frame(W, H);
+  screenUpdate(frame(W, H));
+  colorAhead();
+  mark('frame');
+  ready = true;
+  prefetchDiffs(data);
+  const TIMING = has('--timing');
   for (const tok of (opt('--keys') || '').split(',').filter(Boolean)) {
+    // ms is the wait until the frame is ready. busy is the part of it the main thread did work, when keys typed meanwhile wait.
+    const t = performance.now(), elu = performance.eventLoopUtilization();
+    let r;
     if (tok.startsWith('agents=')) fakeAgents = tok.slice(7);
+    else if (tok.startsWith('wait:')) await new Promise((res) => setTimeout(res, +tok.slice(5))); // idle time, for work done in the background
     else if (tok === 'poll') pollTarget();
+    else if (tok === 'tick') r = checkFiles(); // the file check the 2-second poll runs
     else if (tok.startsWith('text:')) for (const ch of tok.slice(5)) handle(ch);
-    else if (/^(click|up|down|drag|release)@/.test(tok)) { const [w, xy] = tok.split('@'); const [x, y] = xy.split(':'); handle(`\x1b[<${{ click: 0, up: 64, down: 65, drag: 32, release: 0 }[w]};${x};${y}${w === 'release' ? 'm' : 'M'}`); }
-    else handle(TOK[tok] ?? tok);
-    frame(W, H);
+    else if (/^(click|up|down|drag|release)@/.test(tok)) { const [w, xy] = tok.split('@'); const [x, y] = xy.split(':'); r = handle(`\x1b[<${{ click: 0, up: 64, down: 65, drag: 32, release: 0 }[w]};${x};${y}${w === 'release' ? 'm' : 'M'}`); }
+    else r = handle(TOK[tok] ?? tok);
+    if (r?.then) await r;
+    const bytes = screenUpdate(frame(W, H)).length;
+    colorAhead();
+    if (TIMING) timing.keys.push({ tok, ms: +(performance.now() - t).toFixed(3), busy: +performance.eventLoopUtilization(elu).active.toFixed(3), bytes });
   }
+  if (has('--timing')) process.stderr.write(JSON.stringify(timing) + '\n');
   let out = frame(W, H).join('\n');
   if (has('--plain')) out = out.replace(/\x1b\[[0-9;]*m/g, '');
   console.log(out);
@@ -1199,22 +1330,32 @@ startTty();
 })();
 
 function startTty() {
-const draw = () => tty.write('\x1b[H' + frame(tty.columns || 100, tty.rows || 30).join('\r\n'));
+const draw = () => { const out = screenUpdate(frame(tty.columns || 100, tty.rows || 30)); if (out) tty.write(out); colorAhead(); };
 tty.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[>1u');
 process.stdin.setRawMode(true);
 process.stdin.setEncoding('utf8');
 process.stdin.resume();
+// Keys run in order. One that waits on git, like o, holds the keys typed after it until it is done.
+let keys = Promise.resolve();
 process.stdin.on('data', (chunk) => {
-  let changed = false;
-  for (const t of chunk.match(TOKEN_RE) || []) if (handle(t) !== 'same') changed = true;
-  if (changed) draw();
+  keys = keys.then(async () => {
+    let changed = false;
+    for (const t of chunk.match(TOKEN_RE) || []) {
+      let r = handle(t);
+      if (r?.then) r = await r;
+      if (r !== 'same') changed = true;
+    }
+    if (changed) draw();
+  });
 });
-tty.on('resize', () => { tty.write('\x1b[2J'); draw(); });
+tty.on('resize', () => { tty.write('\x1b[2J'); shown = []; draw(); });
 setInterval(() => {
-  try { if (!st.input && reload(false)) draw(); } catch {}
+  if (!st.input) checkFiles().then((changed) => { if (changed) draw(); });
   const before = targetLabel() + st.msg;
   pollTarget(() => { if (targetLabel() + st.msg !== before) draw(); });
   if (st.msg && Date.now() - st.msgAt > 4000) { st.msg = ''; draw(); }
 }, 2000);
 draw();
+ready = true;
+prefetchDiffs(data);
 }
