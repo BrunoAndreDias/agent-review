@@ -2,11 +2,11 @@
 // Times what the user waits for in review.js: startup to the first frame, keys, the 2-second file check, and the
 // project picker. It drives the snapshot mode with --timing and reports the median of several runs.
 //
-//   node prototypes/line-comments/bench.js [repo ...] [--runs 5] [--json out.json] [--fixture <folder>]
+//   node prototypes/line-comments/bench.js [repo ...] [--runs 5] [--json out.json] [--fixture <folder>] [--only <text>]
 //
 // With no repo it builds a large synthetic repo (2000 files, 400 changed, one 20000-line file, binary files, 20 repos
 // next to it for the picker) in --fixture, or in a temp folder. An existing --fixture is reused, so runs before and
-// after a change time the same repo. It never writes to a repo you pass.
+// after a change time the same repo. --only runs the scenarios whose name holds <text>. It never writes to a repo you pass.
 //
 // ms is the wait from the key to its frame. busy is the part of it the main thread worked, when typed keys wait too.
 // In a repo with no changes the picker opens at start, so there only the startup and picker rows mean anything.
@@ -20,7 +20,7 @@ const REVIEW = path.join(__dirname, 'review.js');
 const argv = process.argv.slice(2);
 const opt = (n, d) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : d; };
 const RUNS = +opt('--runs', 5);
-const repos = argv.filter((a, i) => !a.startsWith('--') && !['--runs', '--json', '--fixture'].includes(argv[i - 1]));
+const repos = argv.filter((a, i) => !a.startsWith('--') && !['--runs', '--json', '--fixture', '--only'].includes(argv[i - 1]));
 
 function fixture() {
   const dir = opt('--fixture') ? path.resolve(opt('--fixture')) : fs.mkdtempSync(path.join(os.tmpdir(), 'review-bench-'));
@@ -69,7 +69,7 @@ const SCENARIOS = [
   { name: 'Explorer: next file in tree', keys: down(20), pick: range(0, 20) },
   { name: 'Explorer: next file, 300ms apart', keys: down(10).flatMap((k) => [k, 'wait:300']), pick: range(0, 10).map((i) => 2 * i) },
   { name: 'Explorer: move down in code', keys: ['right', ...down(30)], pick: range(1, 31) },
-  { name: 'poll file check, no change', keys: Array(6).fill('tick'), pick: range(1, 6) },
+  { name: 'poll file check, no change', keys: ['wait:2000', ...Array(6).fill('tick')], pick: range(2, 7) },
   { name: 'open project picker (o)', keys: ['o', 'esc', 'o', 'esc', 'o'], pick: [0, 2, 4] },
 ];
 function range(a, b) { return Array.from({ length: b - a }, (_, i) => a + i); }
@@ -91,7 +91,7 @@ const results = [];
 const targets = repos.length ? repos.map((r) => path.resolve(r.replace(/^~(?=\/|$)/, os.homedir()))) : [fixture()];
 console.log(`${'repo'.padEnd(14)} ${'scenario'.padEnd(30)} ${'ms'.padStart(8)} ${'busy ms'.padStart(8)}  bytes`);
 for (const repo of targets) {
-  for (const sc of SCENARIOS) {
+  for (const sc of SCENARIOS.filter((x) => !opt('--only') || x.name.includes(opt('--only')))) {
     const ms = [], busy = [], bytes = [];
     let phases;
     for (let i = 0; i < RUNS; i++) {

@@ -1271,7 +1271,6 @@ mark('load');
 bindDefault();
 freshView();
 mark('view');
-// Opened from a repo with no changes, such as the folder an agent was started in, it offers the projects that have some.
 
 const TOKEN_RE = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\r|\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-D]|\x1b|[\s\S]/g;
 const TOK = { shiftenter: '\x1b[13;2u', ctrlj: '\n', down: '\x1b[B', up: '\x1b[A', left: '\x1b[D', right: '\x1b[C', enter: '\r', tab: '\t', esc: '\x1b', bs: '\x7f', space: ' ' };
@@ -1292,6 +1291,7 @@ function quit() {
 }
 
 (async () => {
+// Opened from a repo with no changes, such as the folder an agent was started in, it offers the projects that have some.
 if (!data.changedList.length) { const list = await discover(); if (list.some((p) => p.changed)) await pickProject(true, list); }
 mark('picker');
 await highlighterReady;
