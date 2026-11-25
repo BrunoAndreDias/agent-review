@@ -164,7 +164,6 @@ const inRange = (c, a) => !!a && !c.file && c.side === a.side && a.line >= c.fro
 const lineLabel = (c) => (c.file ? 'whole file' : c.from === c.line ? `L${c.line}` : `L${c.from}–${c.line}`);
 const commentsAt = (r) => { const a = r && anchorOf(r); return a ? commentsFor(r.p).filter((c) => inRange(c, a)) : []; };
 const draftAnchor = () => st.input && (st.input.anchor || st.input.edit);
-const CUI = { 1: 'Inline cards', 2: 'Gutter + peek', 3: 'Margin notes' };
 
 function wrap(text, w) {
   const out = [];
@@ -181,7 +180,7 @@ function wrap(text, w) {
   return out;
 }
 
-// Inline cards: comment boxes are real rows in the document, so the code below moves down.
+// Comment boxes are real rows in the document, so the code below moves down.
 function fileDoc(p, full) {
   const out = [];
   const cs = commentsFor(p);
@@ -191,7 +190,7 @@ function fileDoc(p, full) {
   if (inp && !inp.edit && inp.anchor.file && inp.anchor.p === p) out.push(...rows(null, true));
   for (const r of rowsFor(p, full)) {
     out.push({ ...r, p });
-    const a = st.cui === 1 && anchorOf(r);
+    const a = anchorOf(r);
     if (!a) continue;
     for (const c of cs) if (c.side === a.side && c.line === a.line && (!c.hidden || inp?.edit === c)) out.push(...rows(c, inp?.edit === c));
     const an = inp && !inp.edit && inp.anchor;
@@ -252,7 +251,7 @@ const st = {
   a: { focus: 'tree', sel: 0, top: 0, cur: 0, vtop: 0, full: false, path: null },
   b: { focus: 'view', sel: 0, cur: 0, top: 0 },
   input: null, picker: null, preview: null, msg: '', msgAt: 0, pageH: 20,
-  cui: +(opt('--cui') || 1), lw: null, hx: 0, resizing: false, hover: false, vis: null, drag: null, docW: 80, activeC: null,
+  lw: null, hx: 0, resizing: false, hover: false, vis: null, drag: null, docW: 80, activeC: null,
 };
 // The side panel's width. st.lw is null until the user sets it, and then both views share it.
 const fitPanel = (W, n) => Math.max(16, Math.min(W - 30, n));
@@ -448,74 +447,20 @@ function visRange(doc, cur) {
   if (!st.vis || doc[st.vis.i]?.p !== doc[cur]?.p) return null;
   return [Math.min(st.vis.i, cur), Math.max(st.vis.i, cur)];
 }
-// Margin notes take a column on the right; cards in the code use what is left.
-const marginW = (w) => (st.cui === 3 ? Math.max(26, Math.min(46, Math.floor(w * 0.34))) : 0);
-const codeW = (w) => (marginW(w) ? w - marginW(w) - 1 : w);
 function docLines(doc, cur, top, h, w, focused) {
-  const mw = marginW(w), cw = codeW(w);
   st.activeC = doc[cur]?.c || commentsAt(doc[cur])[0] || null;
   const vr = visRange(doc, cur);
   // The longest code line on screen sets how far the code can scroll sideways. The gutter takes 9 columns.
   const longest = Math.max(0, ...doc.slice(top, top + h).filter(anchorOf).map((r) => r.t.replace(/\t/g, '  ').length));
-  st.hx = Math.max(0, Math.min(st.hx, longest - (cw - 9) + 2));
+  st.hx = Math.max(0, Math.min(st.hx, longest - (w - 9) + 2));
   const out = [];
   for (let i = 0; i < h; i++) {
     const idx = top + i, r = doc[idx];
-    out.push(r ? docLine(r, cw, idx === cur, focused, !!vr && idx >= vr[0] && idx <= vr[1]) : paint('', cw, C.editor));
+    out.push(r ? docLine(r, w, idx === cur, focused, !!vr && idx >= vr[0] && idx <= vr[1]) : paint('', w, C.editor));
   }
-  if (st.cui === 2) overlayPeek(out, doc, cur, top, h, w, focused);
-  if (mw) { const m = marginLines(doc, top, h, mw); for (let i = 0; i < h; i++) out[i] += sep + m[i]; }
   return out;
 }
 
-// Gutter + peek: nothing is inserted into the code. The cursor's comments are drawn over the lines below it.
-function overlayPeek(out, doc, cur, top, h, w, focused) {
-  const bw = boxW(w);
-  let lines = [], idx;
-  if (st.input?.anchor?.file || st.input?.edit?.file || doc[cur]?.k === 'box') return;
-  if (st.input) {
-    const an = draftAnchor();
-    idx = doc.findIndex((r) => r.p === an.p && anchorOf(r)?.side === an.side && anchorOf(r)?.line === an.line);
-    lines = cardBox(st.input.edit || null, true, bw, true);
-  } else {
-    const cs = focused ? commentsAt(doc[cur]).filter((c) => !c.hidden) : [];
-    if (!cs.length) return;
-    idx = cur;
-    for (const c of cs) lines.push(...cardBox(c, false, bw, true));
-  }
-  if (idx < 0) return;
-  let y = idx - top + 1;
-  if (y + lines.length > h) y = Math.max(0, idx - top - lines.length);
-  lines.forEach((l, j) => { if (y + j >= 0 && y + j < h) out[y + j] = indentBox(l, w, bw); });
-}
-
-// Margin notes: a column beside the code, each note level with the first line it covers.
-function marginLines(doc, top, h, mw) {
-  const blocks = [];
-  const inp = st.input, an = inp && !inp.edit && inp.anchor;
-  for (let i = 0; i < h; i++) {
-    const r = doc[top + i], a = r && anchorOf(r);
-    if (!a) continue;
-    for (const c of commentsFor(r.p)) if (c.side === a.side && c.from === a.line && (!c.hidden || inp?.edit === c)) blocks.push({ i, c, draft: inp?.edit === c });
-    if (an && an.p === r.p && an.side === a.side && an.from === a.line) blocks.push({ i, c: null, draft: true });
-  }
-  const out = Array(h).fill(null);
-  let next = 0;
-  for (const b of blocks) {
-    const active = b.draft || (b.c && b.c === st.activeC);
-    const color = active ? T.accent : T.boxIdle;
-    const head = b.draft ? `✎ ${b.c ? 'Edit' : 'New'} · ${lineLabel(draftAnchor())}` : `◆ ${lineLabel(b.c)}`;
-    const body = wrap(b.draft ? inp.text + '▏' : b.c.text, mw - 3);
-    const rows = [[head, active ? T.link : T.dim], ...body.map((t) => [t, active ? T.fg : T.dim])];
-    if (b.draft) rows.push(['enter save · esc cancel', T.dim]);
-    else if (active) rows.push(['e edit · x delete', T.dim]);
-    rows.push(['', T.dim]);
-    let y = Math.max(b.i, next);
-    for (const [t, col] of rows) { if (y < h) out[y] = bg(T.sideBg) + fg(color) + (t ? '▎' : ' ') + ' ' + fg(col) + fit(t, mw - 2) + R; y++; }
-    next = y;
-  }
-  return out.map((l) => l ?? paint('', mw, C.side));
-}
 function treeLine(n, depth, w, sel, focused) {
   const icon = n.dir ? (st.expanded.has(n.path) ? '⌄ ' : '› ') : '  ';
   const s = n.dir ? null : data.changed.get(n.path);
@@ -541,7 +486,7 @@ function renderA(W, h) {
   const drawer = comments.length ? Math.min(comments.length, 5) + 1 : 0;
   const mh = h - drawer;
   const lw = panelW(W, Math.max(24, Math.min(44, Math.floor(W * 0.3)))), rw = W - lw - 1;
-  st.docW = codeW(rw);
+  st.docW = rw;
   const rows = flatTree();
   a.sel = clamp(a.sel, rows.length);
   a.top = a.free ? Math.max(0, Math.min(a.top, rows.length - mh)) : scroll(a.sel, a.top, mh);
@@ -569,7 +514,7 @@ function renderA(W, h) {
 function renderB(W, h) {
   const b = st.b, list = data.changedList;
   const lw = panelW(W, Math.max(24, Math.min(48, Math.floor(W * 0.32)))), rw = W - lw - 1;
-  st.docW = codeW(rw);
+  st.docW = rw;
   const doc = docB();
   b.cur = clamp(b.cur, doc.length);
   b.top = scroll(b.cur, b.top, h);
@@ -604,8 +549,8 @@ function header(W) {
   const counts = [`${data.changedList.length} changed`, `${comments.length} comments`];
   const join = (ps) => ` ${[...ps, st.onlyChanged && 'changed only'].filter(Boolean).join(' · ')} `;
   const pick = `${project} ${st.picker?.project ? '▴' : '▾'}`;
-  const full = join([pick, `base ${BASE.slice(0, 7)}`, ...counts, targetLabel(), `style ${st.cui} (m)`]);
-  // A narrow header drops base and style first, so the send target stays visible.
+  const full = join([pick, `base ${BASE.slice(0, 7)}`, ...counts, targetLabel()]);
+  // A narrow header drops base first, so the send target stays visible.
   const right = full.length < W - used ? full : join([pick, ...counts, targetLabel()]);
   // A click on the project name, or on the app name, opens the project picker.
   st.projX = used + Math.max(1, W - used - right.length) + 2;
@@ -616,8 +561,8 @@ function header(W) {
 }
 
 const HINTS = {
-  1: 'tab Review · o project · qq quit · ↑↓ move · enter open · ← back · d diff/full · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · H/L or shift-scroll code sideways · 0 back · drag ↔ or [ ] resize panel · = fit names · m comment style · n next change · f changed only · s send · t target · u cancel queued',
-  2: 'tab project · qq quit · ↑↓ move · ←→ files/diffs · v mark viewed · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · H/L or shift-scroll code sideways · 0 back · drag ↔ or [ ] resize panel · = fit names · m style · n next change · s send · t target · u cancel queued · p preview',
+  1: 'tab Review · o project · qq quit · ↑↓ move · enter open · ← back · d diff/full · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · H/L or shift-scroll code sideways · 0 back · drag ↔ or [ ] resize panel · = fit names · n next change · f changed only · s send · t target · u cancel queued',
+  2: 'tab project · qq quit · ↑↓ move · ←→ files/diffs · v mark viewed · enter/double-click comment or hide · c comment, then ↑↓ grow it · C comment file · V select lines · e edit · x delete · H/L or shift-scroll code sideways · 0 back · drag ↔ or [ ] resize panel · = fit names · n next change · s send · t target · u cancel queued · p preview',
 };
 function footer(W) {
   if (st.input) {
@@ -1133,7 +1078,6 @@ function handle(raw) {
   if (k === '0') { st.hx = 0; return; }
   if (k === '[' || k === ']') return setPanelW(st.geo.lw + (k === ']' ? 4 : -4));
   if (k === '=') return setPanelW(st.variant === 1 ? treeFit() : listFit());
-  if (k === 'm') { st.cui = (st.cui % 3) + 1; flash(`Comment style ${st.cui}: ${CUI[st.cui]}`); return; }
   if (k === 'o' || (k === 'tab' && st.variant === 2)) return pickProject();
   if (k === 'tab' || (k === '1' && st.variant === 2) || (k === '2' && st.variant === 1)) return toggleMode();
   if (k === 's') return openSend();
