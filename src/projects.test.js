@@ -57,7 +57,7 @@ test('--projects adds the repos in another folder', () => {
 
 test('choosing a project shows its changes', () => {
   const { header, footer, screen } = run('work', ['o', 'down', 'enter']);
-  assert.match(header, /other ▾ · 1 changed/);
+  assert.match(header, /other ▾ ·.* · 1 changed/);
   assert.match(footer, /Reviewing other · 1 changed/);
   assert.match(screen, /other\.js/);
   assert.doesNotMatch(screen, /work\.js/);

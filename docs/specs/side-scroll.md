@@ -39,6 +39,6 @@ on that, so wrapping is left out.
 
 ## Tests
 
-`prototypes/line-comments/scroll.test.js` drives the snapshot mode on a
+`src/scroll.test.js` drives the snapshot mode on a
 temporary repo with one 95-character line, in a 90-column screen. It checks
 the cut line, the keys, the limit, the mouse buttons and the composer.

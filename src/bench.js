@@ -2,7 +2,7 @@
 // Times what the user waits for in review.js: startup to the first frame, keys, the 2-second file check, and the
 // project picker. It drives the snapshot mode with --timing and reports the median of several runs.
 //
-//   node prototypes/line-comments/bench.js [repo ...] [--runs 5] [--json out.json] [--fixture <folder>] [--only <text>]
+//   node src/bench.js [repo ...] [--runs 5] [--json out.json] [--fixture <folder>] [--only <text>]
 //
 // With no repo it builds a large synthetic repo (2000 files, 400 changed, one 20000-line file, binary files, 20 repos
 // next to it for the picker) in --fixture, or in a temp folder. An existing --fixture is reused, so runs before and

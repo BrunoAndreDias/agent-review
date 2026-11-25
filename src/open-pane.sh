@@ -11,4 +11,4 @@ cwd=${cwd:-$PWD}
 
 pane=$("$herdr" pane split $src --direction right --cwd "$cwd" --focus | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p')
 [ -n "$pane" ] || { echo "agent-review: could not split a pane" >&2; exit 1; }
-"$herdr" pane run "$pane" "exec node '$here/../line-comments/review.js' '$cwd' --target '$src'"
+"$herdr" pane run "$pane" "exec node '$here/review.js' '$cwd' --target '$src'"

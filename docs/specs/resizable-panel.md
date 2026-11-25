@@ -48,6 +48,6 @@ screen. Explorer and Review share `st.lw`. It lasts until the app quits.
 
 ## Tests
 
-`prototypes/line-comments/panel.test.js` drives the snapshot mode on a
+`src/panel.test.js` drives the snapshot mode on a
 temporary repo with one long file name. It finds the divider by its `↔` and
 checks its column after drags, keys and mouse moves.

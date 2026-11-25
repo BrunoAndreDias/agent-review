@@ -68,7 +68,7 @@ files while another project is shown. They last until the app quits.
 
 ## Tests
 
-`prototypes/line-comments/projects.test.js` drives the snapshot mode on
+`src/projects.test.js` drives the snapshot mode on
 temporary repos side by side and one in another folder. It checks the order
 of the list, switching, the comments each project keeps, the clicks, tab, and
 the picker that opens at start.
