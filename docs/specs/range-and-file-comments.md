@@ -68,6 +68,6 @@ kitty keyboard format, as Ghostty does. `CSI 99;2u` is `C`.
 
 ## Tests
 
-`prototypes/line-comments/comments.test.js` drives the snapshot mode on a
+`src/comments.test.js` drives the snapshot mode on a
 temporary repo, the way `send.test.js` does, and checks what the user sees:
 the card titles, the footer, and the message shown by `p`.

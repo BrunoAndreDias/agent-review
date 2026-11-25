@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Throwaway prototype: three ways to comment on a line or a range of lines. m switches between them.
+// agent-review: browse a repo's changes, comment on lines, and send the comments to a herdr agent.
 'use strict';
 const { execFile, execFileSync } = require('child_process');
 const fs = require('fs');
@@ -316,8 +316,7 @@ const LANG = {
 };
 async function initHighlighter() {
   try {
-    const at = require.resolve('shiki', { paths: [__dirname, path.join(__dirname, '../layouts')] });
-    const { createHighlighter } = await import(require('url').pathToFileURL(at).href);
+    const { createHighlighter } = await import('shiki');
     hl = await createHighlighter({ themes: ['dark-plus'], langs: [...new Set(Object.values(LANG))] });
   } catch { hl = null; }
 }
