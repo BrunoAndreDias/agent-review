@@ -28,6 +28,16 @@ On an agent's pane, press the prefix (Ctrl+B by default), then Alt+R. The review
 
 To update, run `herdr plugin update agent-review`.
 
+You can also bind the launcher as a shell key. Use this if you run the reviewer from a checkout:
+
+```toml
+[[keys.command]]
+key = "prefix+alt+r"
+type = "shell"
+command = "<checkout>/src/open-pane.sh"
+description = "review agent changes in a pane"
+```
+
 ## Run it from a checkout
 
 ```sh
@@ -44,11 +54,11 @@ The reviewer checks for changed files every 2 seconds and reloads by itself.
 
 ## Modes
 
-Tab switches between two modes and keeps the same file and line.
+There are two modes. In Explorer, `tab` switches to Review. In Review, `tab` opens the project list, and `1` switches back to Explorer. `2` switches to Review. A click on a mode name in the header also switches. The mode keeps the same file and line.
 
 - Explorer is for use while agents work. It has a file tree on the left and the selected file's diff on the right. `d` shows the full file instead of the diff, and `f` shows only changed files in the tree.
 - Review is for the final pass. It lists the changed files on the left and stacks every diff on the right, like GitHub's "Files changed" tab. `v` marks a file viewed and folds it.
-- In both modes, `n` jumps to the next change.
+- In both modes, `n` jumps to the next change, and `r` reloads the changes.
 
 ## Comments
 
@@ -63,6 +73,7 @@ Comments are drawn as cards below the last line they cover, and the code below t
 - In the composer, `enter` saves and `shift-enter` starts a new line. `alt-enter` and `ctrl-j` also start a new line.
 - While a new comment that was opened on one line is open, `↑` and `↓` move the far end of its range. The range stays in one file, and the header shows it, for example `L1–3`.
 - `e` edits the comment under the cursor, and `x` deletes it.
+- In Explorer, a click on a comment in the drawer at the bottom jumps to it.
 
 Each file can have one comment on the whole file.
 
@@ -75,6 +86,8 @@ Each file can have one comment on the whole file.
 - The review is bound to one agent session. If no agent runs in the `--target` pane, the review is bound to the first agent that works in this repo. The binding uses the session id, so it follows the agent when herdr renumbers panes.
 - The header shows the bound agent and the state of the review. The state is idle, review queued, working on your review, or done with your review. It shows `no agent` when nothing is bound and `agent gone` when the agent stops.
 - `s` sends the review if the agent is idle or done. If the agent is working or blocked, `s` queues the review. The reviewer polls `herdr agent list` every 2 seconds and sends a queued review on the first poll that finds the agent idle.
+- If the review went out while the agent was working, the header shows done after the agent finishes two turns.
+- If nothing is bound or the bound agent is gone, `s` opens the agent picker. Choosing an agent binds it, then sends or queues the review by the same rule.
 - While a review is queued, `s` sends it now and `u` cancels it. Cancelling keeps the comments.
 - If herdr refuses the review because the agent is blocked on a question, the review stays queued. Any other error keeps the comments.
 - `t` opens the agent picker. It lists the bound agent first, then the agents in this repo, then the other agents, then "Copy to clipboard" and "Preview message". Choosing an agent binds it and cancels a queued review.
@@ -101,7 +114,7 @@ The colors copy the Dark Modern theme from VS Code. [Shiki](https://shiki.style)
 
 ## Develop
 
-- `npm test` runs the tests in `src/*.test.js`. They drive the snapshot mode of `src/review.js` and pass `--agents-json <file>` in place of herdr.
+- `npm test` runs the tests in `src/*.test.js`. It needs Node.js 21 or newer to expand the glob. The tests drive the snapshot mode of `src/review.js`, which takes `--snapshot`, `--keys`, `--cols`, `--rows`, `--plain`, and `--timing`. They pass `--agents-json <file>` in place of herdr. In `--keys`, the token `agents=<file>` switches that file, and `poll` runs one poll.
 - `npm run bench -- [repo ...]` times startup, keys, the 2-second file check, and the project picker. With no repo, it builds a large synthetic one. `--fixture <folder>` keeps that repo for the next run.
 - `docs/specs/` holds the spec for each feature. Write the spec before you build a feature.
 

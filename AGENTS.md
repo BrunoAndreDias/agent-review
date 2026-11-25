@@ -6,7 +6,7 @@ and send them to a chosen agent in herdr as its next message.
 
 - Status: in daily use through the herdr plugin. The code is
   `src/review.js`, one Node script, with `src/open-pane.sh` as the herdr
-  launcher. `README.md` documents every key and flag. Update it in the
+  launcher. `README.md` documents the keys and flags. Update it in the
   same change as the behavior.
 - Write a spec in `docs/specs/` before you build a feature. Settle open
   design questions with a throwaway prototype in `prototypes/`. Delete the
